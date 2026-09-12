@@ -1,0 +1,39 @@
+# Idea Hunter Pipeline 🚀
+
+We have successfully built both **Phase 1** and **Phase 2** of the Opportunity Intelligence Engine! The engine is now not only scraping and grouping complaints, but it has a dedicated Competition Agent, a strict Verifier, and a beautiful Local Web Dashboard.
+
+## Phase 2 Upgrades: The Smart Engine
+
+### 1. Advanced Scoring & Verification Gate
+- **Engagement Weighting:** Complaints with more upvotes/engagement get up to a 10% bonus.
+- **Source Diversity:** A problem seen across multiple platforms (e.g., HackerNews + Play Store) gets up to a 20% bonus.
+- **The Verifier:** A strict Python gate that ensures every extracted problem has at least 2 raw complaints backing it up, or strong engagement, before it's allowed to be scored.
+
+### 2. Multi-Agent Extraction
+When a cluster is found, it's now passed to a chain of OpenRouter agents:
+1. **Extractor:** Defines the core problem and user.
+2. **Competition Agent:** Determines *exactly* what competitors exist and *why* they are failing users.
+3. **Devil's Advocate:** Provides a strictly logical, falsifiable reason why the startup idea might fail.
+
+## How to Run the Dashboard
+
+The Markdown reports were great for V1, but you now have a beautiful, glassmorphic **Web Dashboard** powered by a **FastAPI backend**. 
+
+### Terminal 1: Start the API Backend
+Open a terminal and run the FastAPI server:
+```powershell
+.\.venv\Scripts\Activate.ps1
+uvicorn idea_hunter.api.main:app --reload
+```
+
+### Terminal 2: Start the Web Dashboard
+Open a second terminal, navigate into the `dashboard` folder, and start the Vite dev server:
+```powershell
+cd dashboard
+npm run dev
+```
+
+> [!TIP]
+> Open the `localhost` link Vite gives you in your browser. You will see a beautiful **Opportunity Radar** showing all the scored ideas, complete with Devil's Advocate notes, raw evidence chains, and **Accept/Reject** buttons to log your feedback!
+
+Whenever you want to hunt for new ideas, just run the standard CLI commands (`idea-hunter collect ...`, `idea-hunter process extract`, etc.) and hit refresh on the dashboard!

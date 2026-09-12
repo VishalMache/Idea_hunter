@@ -1,0 +1,295 @@
+# Revised Implementation Plan — Local Opportunity Intelligence Engine
+
+## What the Revised Plan Changes
+
+Your new plan cuts scope aggressively and adds a "validation gates" principle: you don't build Phase N+1 until Phase N proves itself. Here's the key decisions your revised plan makes:
+
+- **Drop:** Cognee, Qdrant, LangGraph, fully-local LLM for reasoning, Next.js dashboard (for now)
+- **Add:** PostgreSQL + pgvector (instead of SQLite), a **hosted LLM API** for extraction reasoning, App Store reviews collector, pre-filter before LLM calls, content hashing for dedup/cache, extraction caching, cost tracking, freshness decay, human feedback loop
+- **Merge:** Problem agent + Demand agent → one agent; Competition agent + Trend agent → one agent
+- **Defer:** Dashboard to Phase 4, only when markdown files become the actual bottleneck
+
+---
+
+## What's Already Done (Phase 1 — Partial ✅)
+
+| Component | Status | Notes |
+|---|---|---|
+| HackerNews collector | ✅ Done | `collectors/hackernews.py` — working |
+| Reddit collector | ✅ Scaffolded | `collectors/reddit.py` — needs API keys |
+| GitHub collector | ⚠️ Remove | Not in the revised plan for v1 |
+| App Store reviews collector | ❌ Missing | New requirement |
+| SQLite database + Alembic | ✅ Done | But plan says switch back to **PostgreSQL+pgvector** |
+| DB schema (all tables) | ✅ Done | `db/models.py` — needs `content_hash`, `cluster_id` fields added |
+| Text cleaner | ✅ Done | `processing/cleaner.py` |
+| Deduplicator stub | ✅ Scaffolded | `processing/deduplicator.py` — hash-based dedup not fully wired |
+| Embedder stub | ✅ Scaffolded | `processing/embedder.py` — calls Ollama |
+| HDBSCAN clusterer | ✅ Done | `analysis/clusterer.py` |
+| LLM client (Ollama) | ✅ Done | `llm/client.py` — but plan says use **hosted API** for reasoning |
+| Problem extractor | ✅ Done | `processing/extractor.py` — wired to Ollama only |
+| Deterministic scorer | ✅ Done | `analysis/scorer.py` |
+| CLI (collect + extract + score) | ✅ Done | `cli/main.py` |
+| Confidence calculator | ✅ Scaffolded | `analysis/confidence.py` |
+| Keyword pre-filter | ❌ Missing | Should run BEFORE LLM, no LLM/embedding cost |
+| Cost/token tracking | ❌ Missing | New requirement |
+| Content hash dedup | ❌ Missing | DB field exists in plan but not in models |
+| `last_seen_cursor` per source | ❌ Missing | For incremental crawling |
+| Human feedback storage | ❌ Missing | accept/reject stored per surfaced problem |
+| Markdown report output | ❌ Missing | The actual Phase 1 output |
+| Verifier (evidence tracer) | ❌ Missing | Python query, not LLM |
+| Devil's Advocate agent | ❌ Missing | Phase 3 |
+| Competition + Trend agent | ❌ Missing | Phase 3 |
+
+---
+
+## Phase 1 Completion — Signal → Problem (1–2 weeks)
+
+**Gate:** Does this surface 2–3 problems you didn't already know about and would seriously consider?
+
+### 1.1 Storage — Migrate to PostgreSQL + pgvector
+
+> [!IMPORTANT]
+> The revised plan explicitly requires PostgreSQL + pgvector. SQLite doesn't support vector similarity search for the clustering step. Install PostgreSQL, then we'll run the migration.
+
+#### [MODIFY] [models.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/db/models.py)
+- Add `content_hash: str` field to `Observation` (SHA-256 of `raw_text`) — used for dedup AND extraction caching
+- Add `cluster_id: Optional[int]` to `Observation`
+- Change `embedding` column back to `Vector(768)` (pgvector)
+- Add `last_seen_cursor: str` to `Source` table (for incremental crawling)
+- Rename `OpportunityScore` to match plan: `opportunity_scores` now has `breakdown_json` column
+- Add `UserFeedback` table: `problem_id, verdict (accept/reject), notes, created_at`
+- Add `CostLog` table: `run_id, model, input_tokens, output_tokens, cost_usd, timestamp`
+
+#### [MODIFY] [engine.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/db/engine.py)
+- Switch connection URL to `postgresql+asyncpg://...`
+- Register pgvector extension on engine startup
+
+#### [MODIFY] [config.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/config.py)
+- Add `openai_api_key`, `anthropic_api_key` settings (for hosted LLM)
+- Add `llm_provider: str = "ollama"` toggle — easy switch between local and hosted
+
+---
+
+### 1.2 LLM Client — Add Hosted API Support
+
+The revised plan is clear: **use a hosted LLM (Claude/GPT) for extraction reasoning**. Local Ollama models are only for the cheap pre-filter step.
+
+#### [MODIFY] [llm/client.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/llm/client.py)
+- Add an `AnthropicClient` class (wraps `anthropic` SDK, structured output via tool use)
+- Add an `OpenAIClient` class (wraps `openai` SDK, structured output via `response_format`)
+- Keep the existing `OllamaClient` for local pre-filter use
+- Add `cost_tracker` that logs tokens + estimated cost per call to the `CostLog` table
+- Factory function `get_llm_client(provider)` returns the right one based on `settings.llm_provider`
+
+#### [MODIFY] [llm/router.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/llm/router.py)
+- `classify_complaint()` → always uses **local Ollama** (cheap, fast pre-filter)
+- `extract_problem()` → uses **hosted API** (Claude/GPT, for quality reasoning)
+- Add extraction cache: before calling the API, check DB for existing result by `content_hash`
+
+---
+
+### 1.3 Pre-filter Pipeline (keyword/regex — zero LLM cost)
+
+#### [NEW] processing/prefilter.py
+A standalone filter that runs before embeddings or LLM calls:
+- Keyword/phrase list: `["frustrated", "annoying", "can't", "hate", "wish there was", "no tool", "broken", "nobody solves", "pay for", "terrible", "impossible to"]`
+- Basic sentiment: count negative signal words
+- Min engagement threshold (e.g., >2 upvotes on HN, >5 on Reddit)
+- Returns `True` (promote to next stage) or `False` (discard, log reason)
+
+---
+
+### 1.4 Data Collectors
+
+#### [KEEP + WIRE] [hackernews.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/collectors/hackernews.py)
+- Add `last_seen_cursor` support: store last `objectID` seen per query in `sources` table, only fetch newer items on subsequent runs
+- Generate `content_hash` (SHA-256) on each item before saving
+
+#### [KEEP + WIRE] [reddit.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/collectors/reddit.py)
+- Wire up Reddit API keys from `.env`
+- Add `last_seen_cursor` (store last `fullname` seen per subreddit)
+- Hash-based dedup before insert
+
+#### [NEW] collectors/reviews.py
+- App Store reviews via `app_store_scraper` library (no API key)
+- Target 3-4 app categories relevant to your stack: productivity, developer tools, finance, note-taking
+- Store same schema as other collectors: `source, raw_text, content_hash, published_at, engagement_score`
+
+#### [DELETE] collectors/github.py
+- Not in the revised v1 plan. Remove to reduce scope.
+
+---
+
+### 1.5 Embedding Pipeline
+
+#### [MODIFY] [processing/embedder.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/processing/embedder.py)
+- Currently just a stub. Make it actually call Ollama `nomic-embed-text` and batch-save embeddings to the `observations.embedding` pgvector column
+- Add a CLI command: `idea-hunter process embed --batch-size 50`
+
+---
+
+### 1.6 Clustering
+
+#### [MODIFY] [analysis/clusterer.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/analysis/clusterer.py)
+- Currently takes embeddings as a Python list. Update to:
+  - Load embeddings from DB (all un-clustered observations)
+  - Run HDBSCAN
+  - Save `cluster_id` back to each `Observation` record
+  - Return cluster centroids + a representative sample (the 3 closest-to-centroid texts) per cluster
+- Add CLI: `idea-hunter analyze cluster`
+
+---
+
+### 1.7 Extraction — Per Cluster, Not Per Observation
+
+#### [MODIFY] [processing/extractor.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/processing/extractor.py)
+- Change from per-observation to **per-cluster**: given a cluster, send the 5 most representative observations to the LLM in one call
+- Check extraction cache first (`content_hash` already seen? re-use stored result)
+- One `ExtractedProblem` per cluster → one `Problem` record in DB, linked via `ProblemEvidence` to all observations in that cluster
+
+#### [MODIFY] [llm/prompts.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/llm/prompts.py)
+- Write proper few-shot extraction prompts with 3 good examples for Claude/GPT
+- Keep shorter prompts for the local Ollama pre-filter
+
+---
+
+### 1.8 Markdown Report Output
+
+#### [NEW] output/report_generator.py
+- For each completed `research_run`, generate a markdown file to `reports/run_{id}.md`:
+```
+# Research Run {date}
+## Problem: {title}
+Score: {score} | Confidence: {confidence}% | Evidence: {count} items across {sources} sources
+### Who Has This Problem
+### Why Current Solutions Fail
+### Representative Evidence Quotes
+---
+```
+
+#### [NEW] CLI command: `idea-hunter report generate --run-id <id>`
+
+---
+
+**Phase 1 Gate:** Run the full pipeline on 50 observations across HackerNews + Reddit. Does it surface 2–3 problems you'd seriously consider building for? If yes → Phase 2.
+
+---
+
+## Phase 2 — Scoring + Verifier (1 week)
+
+**Gate:** Does the ranking match your own gut sense of "this one's more promising"?
+
+### 2.1 Complete the Deterministic Scorer
+
+#### [MODIFY] [analysis/scorer.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/analysis/scorer.py)
+- Currently has mocked values for `growth`, `wtp`, `market`, `competition`. Replace with real signals:
+  - `growth`: placeholder pytrends data (or 0.5 until Phase 3 adds Trend agent)
+  - `wtp`: count of mentions of price, "would pay", "subscription" near the problem keywords
+  - `market`: estimated from number of distinct sources + engagement scores
+  - `competition`: count of `existing_solutions` linked to this problem
+- Final formula: `Score = Raw × Evidence Confidence × Source Diversity`
+  - Source diversity = unique `source_type` values across evidence items
+
+#### [MODIFY] [analysis/confidence.py](file:///d:/VMsProject/Creations/idea_hunter/src/idea_hunter/analysis/confidence.py)
+- Wire up the existing stub to calculate real confidence:
+  - Based on: number of evidence items, evidence_strength average, source diversity, model confidence field
+  - Apply **freshness decay**: evidence older than 6 months gets 0.75× weight
+
+### 2.2 Verifier
+
+#### [NEW] analysis/verifier.py
+- For every `Problem`, confirm every claim in its description traces to at least one `evidence_id` in `problem_evidence`
+- Pure Python DB query — not an LLM call
+- Returns `verified: bool` + `unverified_claims: list[str]`
+
+### 2.3 Human Feedback Loop
+
+#### [NEW] CLI command: `idea-hunter feedback accept <problem_id>` / `idea-hunter feedback reject <problem_id> --reason "..."`
+- Stores a `UserFeedback` record
+- Future: use accepted/rejected problems to improve extraction prompts
+
+---
+
+## Phase 3 — Devil's Advocate + Competition Analysis (1–2 weeks)
+
+**Gate:** Does Devil's Advocate actually kill ideas that deserved killing?
+
+### 3.1 Problem + Demand Agent
+
+#### [NEW] agents/problem_demand_agent.py
+- Replaces the current `ProblemExtractor` for the reasoning step
+- Input: cluster representative texts + existing problem record
+- Asks: What's broken? How often? For whom? Any signal of willingness to pay?
+- Output: enriched `Problem` record
+
+### 3.2 Competition + Trend Agent
+
+#### [NEW] agents/competition_trend_agent.py
+- Input: problem description
+- Tasks:
+  - Search for existing solutions (web search via `httpx` + DuckDuckGo API or SerpAPI)
+  - Query pytrends for keyword growth direction
+  - Populate `existing_solutions` table
+- Output: `ExistingSolution[]` records + trend signal added to `OpportunityScore.breakdown_json`
+
+### 3.3 Devil's Advocate Agent
+
+#### [NEW] agents/devils_advocate_agent.py
+- Input: scored Problem + existing solutions + evidence
+- Asks: Why could this fail? What counterevidence exists in the DB? Is the sample biased (e.g., only HN devs complaining)?
+- Output: `devils_advocate_notes` field on `Problem`, plus a confidence adjustment
+
+### 3.4 Kill Switch / Max Iterations
+
+#### [MODIFY] config.py
+- Add `max_agent_iterations: int = 3` — hard cap on any "investigate further" loops
+- Add `max_cost_per_run_usd: float = 2.0` — kill switch for API spend per run
+
+---
+
+## Phase 4 — Continuous Radar (Ongoing, after Phase 3 validates)
+
+Only build if scrolling markdown reports is genuinely the bottleneck.
+
+- Scheduled daily/weekly delta runs via Windows Task Scheduler or a cron
+- Trend-over-time tracking: "Problem moved from rank #34 to #7 this week"
+- Simple FastAPI endpoint to serve reports as JSON
+- Minimal Streamlit dashboard (or Next.js if you want to practice that stack)
+- Source reliability weighting: up-weight sources that historically produced validated problems
+
+---
+
+## Deferred Indefinitely
+
+| Item | Reason |
+|---|---|
+| Cognee / knowledge graph | Only needed if Postgres joins genuinely struggle with multi-hop queries |
+| Qdrant | pgvector handles v1 vector search fine |
+| LangGraph | Plain sequential pipeline with `research_runs` status column is sufficient |
+| Local LLM for reasoning | Fine-tuning effort for weaker signal — revisit if API costs become prohibitive |
+| Fine-tuning | Not needed until Phase 3 validates the signal quality |
+| Next.js dashboard | Phase 4 only |
+
+---
+
+## Immediate Next Steps (in order)
+
+1. **You: Install PostgreSQL** — `winget install PostgreSQL.PostgreSQL` or the installer from postgresql.org
+2. **Us: DB migration** — add `content_hash`, `cluster_id`, `CostLog`, `UserFeedback` to models; run Alembic migration
+3. **Us: Add hosted LLM support** — add Anthropic/OpenAI client, toggle in config. You add your API key to `.env`
+4. **Us: Build pre-filter** — keyword/regex filter before any LLM calls
+5. **Us: Wire dedup + cursor** — incremental crawling + hash-based dedup
+6. **Us: Add reviews collector** — App Store scraper for 3 app categories
+7. **Us: Wire embedder + cluster** — end-to-end: collect → pre-filter → embed → cluster → extract (per cluster) → score → report
+8. **Phase 1 Gate test** — run on 50+ observations, read the markdown report, decide if the signal is real
+
+## Open Questions
+
+> [!IMPORTANT]
+> **API Key decision:** Do you want to use a hosted LLM (Claude/OpenAI) for the extraction reasoning step as the plan recommends? If yes, which one — Claude (better reasoning) or OpenAI (cheaper)? Or do you want to keep local Ollama for everything for now?
+
+> [!IMPORTANT]
+> **PostgreSQL:** Are you ready to install PostgreSQL now so we can migrate from SQLite? The vector similarity search for clustering requires it.
+
+> [!NOTE]
+> **App categories for reviews:** Which 3-4 app categories should the App Store collector target? Suggestions: Developer Tools, Productivity, Finance, Note-taking. Pick based on where you think your ideas might land.

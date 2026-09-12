@@ -1,0 +1,397 @@
+# IDEA HUNTER — Opportunity Intelligence Engine Roadmap
+
+> Upgrading from a **7/10 complaint mining system** to a **9/10 Opportunity Intelligence Engine**
+
+---
+
+## The Philosophy Shift
+
+**Current (7/10):**
+> "Find complaints → score complaints."
+
+**Target (9/10):**
+> "Find signals → discover problems → validate problems → investigate markets → identify gaps → construct opportunities → attack them → score them based on evidence → recommend what should be validated in the real world."
+
+The pipeline stays. The philosophy changes.
+
+---
+
+## Target Architecture
+
+```
+                    INTERNET
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+       Reddit       GitHub     HackerNews
+       Reviews       Issues     Play Store
+          │            │            │
+          └────────────┼────────────┘
+                       ▼
+                  PRE-FILTER
+                  DEDUPLICATION
+                  EMBEDDING
+                  CLUSTERING
+                       │
+             ┌─────────┴──────────┐
+             ▼                    ▼
+        PROBLEM CLUSTERS    SINGLETON SIGNALS
+             │                    │
+             └──────────┬─────────┘
+                        ▼
+              PROBLEM EXTRACTION
+              PROBLEM VALIDATOR
+                        │
+             ┌──────────┼──────────┐
+             ▼          ▼          ▼
+         CUSTOMER    MARKET    COMPETITOR
+          AGENT       AGENT      AGENT
+             │          │          │
+             └──────────┼──────────┘
+                        ▼
+                  SOLUTION GAP
+                  SOLUTION GENERATOR
+                        │
+             ┌──────────┼──────────┐
+             ▼          ▼          ▼
+           TECH      BUSINESS   DISTRIBUTION
+           AGENT      AGENT       AGENT
+             │          │          │
+             └──────────┼──────────┘
+                        ▼
+                 BULL vs BEAR DEBATE
+                 FINAL JUDGE AGENT
+                        ▼
+             EVIDENCE-BACKED SCORE
+             VALIDATION EXPERIMENT
+                        ▼
+               OPPORTUNITY DATABASE
+                        ▼
+                    DASHBOARD
+```
+
+---
+
+## Phase 1 — Fix the Foundation (Do This First)
+
+> **Do not build more features until these are fixed. The current scores are not trustworthy.**
+
+### 1.1 Remove Hardcoded Scoring Values
+
+**Current problem:** `growth_trend`, `willingness_to_pay`, `market_size`, `competition_gap`, `distribution_feasibility`, `technical_feasibility` are all hardcoded to `0.5` in `cli/main.py`. Scores look precise but mean nothing.
+
+**Fix:** Move these dimensions to Phase 2 agents. For now, mark them as `None` / `unresearched` so the score card is honest. Display "Unresearched dimensions: 6" in the dashboard instead of pretending.
+
+### 1.2 Fix GitHub Collector
+
+`github.py` references `settings.github_token` which does not exist in `config.py`. Add the field or the collector crashes.
+
+**Fix:** Add `github_token: str = ""` to `config.py` and `GITHUB_TOKEN=` to `.env.template`.
+
+### 1.3 Implement Cost Logging
+
+The `CostLog` table exists. The `$2.00/run guardrail` exists. Neither actually works.
+
+**Fix:** After every OpenRouter API call, write a `CostLog` row. Before each extraction, check the running total against `max_cost_per_run_usd`. Abort with a warning if over budget.
+
+### 1.4 Implement ResearchRun Tracking
+
+**Fix:** Write a `ResearchRun` row at the start and end of every `collect` and `process extract` command. Record `items_collected`, `status`, and `total_cost_usd`.
+
+### 1.5 Replace JSON Embeddings with pgvector
+
+**Current problem:** Embeddings stored as JSON arrays. No vector similarity search. Will be slow at scale.
+
+**Fix:** Run an Alembic migration to add a proper `vector(768)` column using `pgvector`. This unlocks real semantic similarity queries.
+
+### 1.6 Keep HDBSCAN Noise — Don't Discard It
+
+**Current problem:** Noise label `-1` observations are thrown away. Some single posts represent early-stage, important emerging problems.
+
+**Fix:** After standard clustering, save `-1` observations separately as "singleton signals." Apply a lower initial confidence (0.3) but route them through the same extraction pipeline. This is critical for the "Old Problem → New Solution" discovery path.
+
+### 1.7 Wire Reddit CLI Command
+
+`reddit.py` is fully built. There is no `collect reddit` command. Add it. Gate it on credential existence.
+
+---
+
+## Phase 2 — The Research Intelligence Layer
+
+> This is the most important upgrade. Separates "Problem Discovery" from "Opportunity Discovery."
+
+### The Key Insight
+
+**Problem ≠ Startup**
+
+"People hate filling government forms" is a real problem.  
+But it does not automatically mean "build an app for government forms."
+
+You need a Research Layer that answers: **Is this actually a good business opportunity?**
+
+### 2.1 Customer Research Agent
+
+**Job:** Who actually has this problem and what is their economic value?
+
+Investigates:
+- Who are the affected users? Consumer or B2B?
+- How often do they encounter the problem?
+- What do they currently pay (time or money) to cope?
+- Who makes the purchasing decision?
+- Customer concentration: 10M consumers with mild pain vs. 10K businesses with critical pain?
+
+> **Note:** Engagement ≠ Market demand. A hilarious complaint can get 5,000 upvotes. A boring B2B problem might have 5 comments but represent millions in spend. Do not use engagement as a market proxy.
+
+**Output field:** `customer_analysis` JSON on the `Problem` model.
+
+### 2.2 Market Research Agent
+
+**Job:** Size the real market with evidence, not LLM guesses.
+
+Do not replace `market_size = 0.5` with `GPT: market_size = 0.82`. That's just replacing a hardcoded number with an arbitrary AI number.
+
+Instead, the agent must look for actual signals:
+- Industry size reports (approximate)
+- Number of potential customers it can find evidence for
+- What customers currently spend on adjacent solutions
+- Growth trajectory of the space
+
+**Output field:** `market_research` JSON on the `Problem` model.
+
+### 2.3 Competitor Research Agent
+
+**Job:** Search actual products. Not LLM opinions about products.
+
+For every problem, the agent must find:
+- Named competitors with URLs
+- Their pricing tier
+- Their user/customer count (if public)
+- Their funding (Crunchbase signals)
+- Review scores and complaints (eating your own dog food)
+- Feature gaps and market positioning
+
+**This is where your Competition Agent upgrades from:** "here are some competitor names" **to:** "here is why Competitor X has 50,000 angry users about Feature Y, and here is the market gap."
+
+### 2.4 Technical Feasibility Agent
+
+**Job:** Can this actually be built?
+
+Evaluate:
+- Required technology (does it exist?)
+- Existing APIs and infrastructure that could accelerate it
+- Development complexity
+- Regulatory environment (especially important for fintech, health, gov)
+- Capital requirements for MVP
+
+### 2.5 Distribution Difficulty Agent
+
+**Job:** How would this startup acquire its first 100 customers?
+
+For every opportunity:
+1. Where do the target customers exist online and offline?
+2. How can they be reached (channels)?
+3. What is the estimated acquisition method (cold outreach, SEO, virality, partner)?
+4. How hard is that distribution channel to break into?
+
+> This single agent kills many attractive-looking ideas.
+
+### 2.6 Add "Why Now?" Dimension (10-15% scoring weight)
+
+**Currently missing entirely.** This is one of the most important startup signals.
+
+Ask: *Why is this opportunity attractive NOW, rather than 5 years ago?*
+
+Possible triggers:
+- New technology (e.g., LLMs making previously-complex NLP cheap)
+- New regulation (e.g., GDPR creating privacy tools market)
+- Cost reduction (e.g., cloud compute dropping, enabling new products)
+- Behavior change (e.g., remote work permanently changing software needs)
+- New infrastructure (e.g., Stripe making payments easy, enabling 10K fintech startups)
+- Demographic shift
+- Platform change (e.g., Apple Vision Pro creating new interaction paradigm)
+
+---
+
+## Phase 3 — Improve Discovery
+
+### 3.1 Singleton Signal Pipeline
+
+Route HDBSCAN noise points (`label=-1`) through a separate, lower-confidence extraction. Mark them as `signal_type = "singleton"` in the `problems` table. Give them `confidence = 0.3` by default.
+
+These are the early-warning system for emerging trends before they become mainstream complaints.
+
+### 3.2 Trend Detection
+
+Populate the `trends` table by comparing cluster sizes across different collection runs over time. A cluster growing from 3 to 30 observations in two weeks is a strong signal. Surface this in the dashboard as a "Rising" badge.
+
+### 3.3 Old Problem → New Solution Engine
+
+Add a second discovery path alongside complaint mining:
+
+```
+Path A (current): Internet complaints → opportunities
+Path B (new):     Old unsolved problems + technology change → opportunities
+```
+
+For Path B, maintain a curated list of "known hard problems" and periodically ask: *"What recent technology shift makes this problem now solvable that wasn't 3 years ago?"*
+
+This is where compound opportunities live (e.g., the entire vertical SaaS wave was Path B — old industry problems + cheap cloud compute).
+
+---
+
+## Phase 4 — Evidence-Backed Scoring
+
+### 4.1 Replace Star Ratings With Evidence Counts
+
+Every dimension on the score card should show its evidence, not just a number.
+
+**Current output:**
+```
+Score: 87%
+```
+
+**Target output:**
+```
+OPPORTUNITY SCORE: 87 / 100
+Confidence: 82%
+
+Why Now         ★★★★★  (Trigger: LLM cost reduction)
+Pain            ★★★★★  (23 user complaints, 4 platforms)
+Market          ★★★★☆  (Est. $2B TAM, 12% YoY growth signals)
+Competition Gap ★★★★☆  (Top 3 competitors rated 2.3/5 on this issue)
+Willingness to Pay ★★★★☆  (3 "I pay for" signals, avg $47/mo adjacent)
+Distribution    ★★★☆☆  (B2B sales required, long cycles)
+Technical       ★★★★★  (APIs exist, no regulation blockers)
+Evidence        ★★★★☆  (7 independent sources cross-validated)
+
+VERDICT: VALIDATE
+
+First Experiment:
+Interview 10 [target customers] and confirm whether they currently spend
+money or time solving this. Ask: "What would you pay for a perfect solution?"
+```
+
+### 4.2 Evidence Strength System
+
+For every opportunity, maintain a live evidence ledger:
+
+```
+Evidence Ledger
+───────────────
+User complaints:         23 observations
+Independent sources:      7 cross-referenced
+Platforms covered:        4 (HN, Play Store, GitHub, Reddit)
+Named competitors found:  5
+Pricing evidence signals: 3 ("I pay $47/mo for...")
+Market growth signals:    4
+Recent signals (30 days): 8
+
+Evidence Confidence: 87%
+```
+
+**Every major claim must have a source attached.** This is what prevents the system from being an LLM hallucination machine.
+
+### 4.3 Bull vs. Bear Debate Stage
+
+Upgrade the current `devils_advocate_notes` field into a full research stage:
+
+```
+Opportunity
+      ↓
+Bull Agent  → "Here is the strongest case for building this."
+      ↓
+Bear Agent  → "Kill this startup idea. Here is every structural reason it fails."
+      ↓
+Competitor Agent → "Here is who would crush you and why."
+      ↓
+Technical Agent → "Here are the technical risks."
+      ↓
+Final Judge → "Given all arguments, here is my verdict and confidence."
+```
+
+If the Bear Agent **cannot kill the idea after serious investigation**, that is a much stronger positive signal than an LLM saying "confidence: 0.87."
+
+---
+
+## Phase 5 — Make it Autonomous
+
+```
+Nightly Cron
+      ↓
+Collect (all sources)
+      ↓
+Process (embed → cluster → extract)
+      ↓
+Research (all agents)
+      ↓
+Score (evidence-backed)
+      ↓
+Rank (delta from last run)
+      ↓
+Notify (new opportunities, rising signals, falling confidence)
+```
+
+Add a `--since` flag to all collectors so nightly runs only pull new data, not re-pull everything.
+
+---
+
+## What to NOT Build Next
+
+| Temptation | Verdict | Reason |
+|---|---|---|
+| More dashboard polish | ❌ Skip for now | Dashboard is sufficient. Scores aren't trustworthy yet. |
+| More LLM agents without fixing scoring | ❌ Skip | More agents on bad inputs = more confident wrong answers |
+| Adding 15 autonomous agents at once | ❌ Skip | Over-agentization. Keep deterministic where possible. |
+| Replacing architecture entirely | ❌ Skip | Foundation is solid. Don't restart. |
+
+---
+
+## Engineering Principle: Deterministic First, Agentic Where It Matters
+
+```
+DETERMINISTIC (keep as code logic)
+───────────────────────────────────
+Collection
+Filtering
+Deduplication
+Embedding
+Clustering
+Cost logging
+Basic validation rules
+
+AGENTIC (use LLM where reasoning is actually required)
+───────────────────────────────────────────────────────
+Problem interpretation
+Market research
+Competitor research
+Customer analysis
+Solution generation
+Technical feasibility
+Devil's Advocate
+Final synthesis
+```
+
+---
+
+## Execution Order (Exact Next Steps)
+
+| Priority | Task | Effort |
+|---|---|---|
+| 1 | Fix hardcoded 0.5 scores — mark as "unresearched" | Small |
+| 2 | Fix `github_token` in config.py | Tiny |
+| 3 | Implement CostLog writes + budget guardrail | Small |
+| 4 | Implement ResearchRun tracking | Small |
+| 5 | Add `collect reddit` CLI command | Small |
+| 6 | Keep HDBSCAN singletons as low-confidence signals | Small |
+| 7 | Migrate embeddings to pgvector | Medium |
+| 8 | Customer Research Agent | Medium |
+| 9 | Market Research Agent | Medium |
+| 10 | Competitor Research Agent (upgrade existing) | Medium |
+| 11 | Technical + Distribution Agents | Medium |
+| 12 | "Why Now?" dimension + scoring weight | Medium |
+| 13 | Evidence Strength ledger | Medium |
+| 14 | Bull vs. Bear debate stage | Large |
+| 15 | Singleton signal pipeline | Medium |
+| 16 | Trend detection | Medium |
+| 17 | Evidence-backed score card in dashboard | Large |
+| 18 | Nightly autonomous run | Large |

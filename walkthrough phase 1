@@ -1,0 +1,39 @@
+# Phase 1 Completion: Idea Hunter Engine 🚀
+
+We have successfully built the **Phase 1 Pipeline** of your Opportunity Intelligence Engine! The entire end-to-end workflow is now wired up, transitioning from raw data scraping to synthesized, scored startup opportunities.
+
+Here is a summary of what we accomplished based on your revised plan:
+
+## 1. Robust Foundation (PostgreSQL + pgvector)
+We migrated away from SQLite and set up **PostgreSQL 17** as the central nervous system. 
+- All raw observations are now deduplicated via `content_hash` using PostgreSQL's `ON CONFLICT DO NOTHING`.
+- We added `cursor_value` tracking to all sources, meaning the engine can incrementally crawl data without re-processing old items.
+
+## 2. High-Signal Data Collectors
+Alongside HackerNews, we built a brand new **Play Store Reviews Collector**:
+- Scrapes the store for apps matching your categories (`Developer Tools`, `Productivity`, `Business`, `Finance`).
+- Explicitly targets **1-star to 3-star reviews** to guarantee we only extract pain points and complaints.
+
+## 3. The "Free" Pre-Filter Gate
+We built `processing/prefilter.py` which runs *before* any LLMs or embeddings are called.
+- It uses a curated list of over 30 "pain keywords" (e.g., "frustrated", "hate", "workaround", "tedious").
+- This drops obvious noise instantly, saving you API credits and processing time.
+
+## 4. Clustering & OpenRouter Extraction
+We wired up the analytical brain of the engine:
+1. **Embeddings:** Passed items are locally embedded using `nomic-embed-text` via Ollama.
+2. **Clustering:** HDBSCAN groups similar complaints together into distinct problem clusters (minimum size of 3).
+3. **Extraction:** We integrated **OpenRouter** (defaulting to `Claude 3.5 Haiku`) using OpenAI's structured outputs. It analyzes the *entire cluster* at once to synthesize the core problem, extract the target user, identify workarounds, and even generate a "Devil's Advocate" reason why the idea might fail.
+
+## 5. Scoring & Reporting
+Finally, the deterministic scorer evaluates the problems and outputs a beautiful Markdown report.
+
+> [!TIP]
+> **Try it yourself!** Run these commands sequentially in your terminal:
+> 1. `idea-hunter collect hackernews --query "hate manually" --limit 100`
+> 2. `idea-hunter collect reviews --query "productivity" --limit 50`
+> 3. `idea-hunter process embed`
+> 4. `idea-hunter process cluster`
+> 5. `idea-hunter process extract`
+> 6. `idea-hunter analyze score`
+> 7. `idea-hunter output report`

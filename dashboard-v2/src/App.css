@@ -1,0 +1,98 @@
+.app-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.header {
+  border-bottom: 1px solid var(--border-color);
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(12px);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.header-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 64px;
+}
+
+.logo-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--text-primary);
+  color: var(--bg-color);
+  border-radius: 8px;
+}
+
+.logo-group h1 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.stats-group {
+  display: flex;
+  gap: 24px;
+}
+
+.stat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.875rem;
+}
+
+.stat-val {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.stat-label {
+  color: var(--text-secondary);
+}
+
+.main-content {
+  padding-top: 48px;
+  padding-bottom: 48px;
+}
+
+.section-header {
+  margin-bottom: 32px;
+}
+
+.section-header h2 {
+  font-size: 1.5rem;
+  margin-bottom: 4px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 24px;
+}
+
+.loading-state, .empty-state {
+  padding: 48px 0;
+  text-align: center;
+  border: 1px dashed var(--border-color);
+  border-radius: 12px;
+  background: var(--panel-bg);
+}
+
+.empty-state p:first-child {
+  margin-bottom: 8px;
+  font-weight: 500;
+}
