@@ -1,14 +1,14 @@
 :root {
-  --bg-color: #000000;
-  --panel-bg: #0a0a0a;
-  --panel-hover: #141414;
-  --border-color: #262626;
-  --border-subtle: #171717;
-  --text-primary: #ededed;
-  --text-secondary: #a1a1aa;
-  --text-muted: #52525b;
+  --bg-color: #101110;
+  --panel-bg: #171917;
+  --panel-hover: #1d211e;
+  --border-color: #2a302b;
+  --border-subtle: #202520;
+  --text-primary: #f0f1ec;
+  --text-secondary: #a6ada4;
+  --text-muted: #687168;
   
-  --accent: #e5e5e5;
+  --accent: #d8e2d5;
   --danger: #ef4444;
   --success: #10b981;
   
@@ -29,6 +29,7 @@ body {
   -moz-osx-font-smoothing: grayscale;
   line-height: 1.5;
   min-height: 100vh;
+  background-image: radial-gradient(circle at 50% -10%, rgba(104, 150, 114, .10), transparent 36rem);
 }
 
 h1, h2, h3, h4 {
@@ -49,9 +50,9 @@ h1, h2, h3, h4 {
 
 /* Utilities */
 .container {
-  max-width: 1200px;
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 0 2rem;
+  padding: 0 2.5rem;
 }
 
 .text-secondary { color: var(--text-secondary); }
@@ -66,7 +67,7 @@ h1, h2, h3, h4 {
   padding: 0.5rem 1rem;
   font-size: 0.875rem;
   font-weight: 500;
-  border-radius: 6px;
+  border-radius: 7px;
   border: 1px solid var(--border-color);
   background: var(--panel-bg);
   color: var(--text-primary);

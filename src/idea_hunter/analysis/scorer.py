@@ -10,8 +10,9 @@ class EvidenceScorer:
         """Calculates the raw evidence ledger counts."""
         user_complaints = len(observations)
         
-        # Sources are unique authors/usernames (if we had them), we'll use count for now
-        # Platforms covered (e.g., hacker_news, play_store)
+        # A source is an independent author when available.  Fall back to the
+        # observation ID so anonymous observations are never collapsed together.
+        independent_sources = len(set(obs.author or f"observation:{obs.id}" for obs in observations))
         platforms_covered = len(set(obs.source_id for obs in observations))
         
         # Competitors from research
@@ -22,11 +23,15 @@ class EvidenceScorer:
         
         # Recent signals (last 30 days)
         now = datetime.now(timezone.utc)
-        recent_signals = sum(1 for obs in observations if obs.created_at and (now - obs.created_at) < timedelta(days=30))
+        recent_signals = sum(
+            1 for obs in observations
+            if (obs.published_at or obs.collected_at)
+            and (now - (obs.published_at or obs.collected_at)) < timedelta(days=30)
+        )
         
         return {
             "user_complaints": user_complaints,
-            "independent_sources": user_complaints,  # Assuming each observation is independent for now
+            "independent_sources": independent_sources,
             "platforms_covered": platforms_covered,
             "named_competitors": named_competitors,
             "pricing_signals": pricing_signals,
@@ -84,9 +89,11 @@ class EvidenceScorer:
                 tech_score = research.technical_feasibility.get("score", 0.5)
                 tech_evidence = f"Complexity: {research.technical_feasibility.get('complexity_score', 5)}/10. {research.technical_feasibility.get('regulatory_blockers', 'No major blockers')}"
 
-        # Combine into final score
+        # Opportunity potential and evidence confidence answer different
+        # questions.  Keep both: an early signal can be interesting without
+        # being sufficiently corroborated to recommend building it yet.
         # Weighting: 20% Pain, 15% Market, 15% WTP, 15% Why Now, 15% Comp, 10% Dist, 10% Tech
-        final_score = (
+        potential_score = (
             pain_score * 0.20 +
             market_score * 0.15 +
             wtp_score * 0.15 +
@@ -96,14 +103,31 @@ class EvidenceScorer:
             tech_score * 0.10
         )
         
-        evidence_confidence = min(1.0, 0.4 + (0.1 * ledger['platforms_covered']) + (0.05 * min(10, ledger['independent_sources'])))
+        engagement_signal = min(1.0, sum(max(0, obs.engagement or 0) for obs in observations) / 25)
+        evidence_confidence = min(
+            1.0,
+            0.10
+            + (0.10 * min(3, ledger['user_complaints']))
+            + (0.15 * min(2, ledger['platforms_covered']))
+            + (0.10 * min(3, ledger['independent_sources']))
+            + (0.15 * engagement_signal),
+        )
         ledger["evidence_confidence"] = evidence_confidence
-        
-        final_score = final_score * evidence_confidence
+        ledger["potential_score"] = potential_score
+
+        final_score = potential_score * evidence_confidence
+        if evidence_confidence < 0.50:
+            recommendation = "VALIDATE: collect corroborating evidence before committing to a build."
+        elif potential_score >= 0.65:
+            recommendation = "INVESTIGATE: evidence is credible enough for customer interviews or a small test."
+        else:
+            recommendation = "DEPRIORITIZE: evidence exists, but the current opportunity potential is modest."
 
         return {
             "final_score": round(min(1.0, final_score), 4),
+            "potential_score": round(min(1.0, potential_score), 4),
             "confidence": round(evidence_confidence, 4),
+            "recommendation": recommendation,
             "dimensions": {
                 "why_now": {"score": why_now_score, "evidence": why_now_evidence},
                 "pain": {"score": pain_score, "evidence": pain_evidence},

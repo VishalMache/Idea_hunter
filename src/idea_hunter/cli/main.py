@@ -18,7 +18,7 @@ from idea_hunter.analysis.clusterer import ProblemClusterer
 from idea_hunter.analysis.scorer import EvidenceScorer
 from idea_hunter.output.report_generator import MarkdownReportGenerator
 from idea_hunter.processing.verifier import ProblemVerifier
-from idea_hunter.processing.researcher import research_problem
+from idea_hunter.processing.researcher import research_problem, research_priority
 from idea_hunter.llm.router import model_router
 from sqlalchemy.dialects.postgresql import insert
 
@@ -476,13 +476,16 @@ def extract_problems(limit: int = typer.Option(10, help="Number of clusters to p
     run_async(_run())
 
 @process_app.command("verify")
-def verify_problems():
+def verify_problems(
+    retry_flagged: bool = typer.Option(False, help="Re-evaluate problems flagged by the previous verifier."),
+):
     """Verify extracted problems before they are scored."""
     console.print("Running verification checks on extracted problems...")
     
     async def _run():
         async with session_scope() as session:
-            stmt = select(Problem).where(Problem.verified == False, Problem.status != "flagged")
+            statuses = ["new", "needs_evidence"] + (["flagged"] if retry_flagged else [])
+            stmt = select(Problem).where(Problem.verified == False, Problem.status.in_(statuses))
             result = await session.execute(stmt)
             problems = result.scalars().all()
             
@@ -491,25 +494,36 @@ def verify_problems():
                 return
                 
             verified_count = 0
-            flagged_count = 0
+            needs_evidence_count = 0
+            rejected_count = 0
             
             for prob in problems:
-                is_valid = await ProblemVerifier.verify(session, prob.id)
-                if is_valid:
+                result = await ProblemVerifier.verify(session, prob.id)
+                prob.verification_attempts = (prob.verification_attempts or 0) + 1
+                prob.verification_reason = result.reason
+                prob.verification_details = result.details
+                if result.verified:
                     prob.verified = True
+                    prob.status = "verified"
                     verified_count += 1
+                elif result.reason in {"missing_problem"}:
+                    prob.status = "rejected"
+                    rejected_count += 1
                 else:
-                    prob.status = "flagged"
-                    flagged_count += 1
+                    prob.status = "needs_evidence"
+                    needs_evidence_count += 1
                     
             await session.flush()
-            console.print(f"Verified {verified_count} problems. Flagged {flagged_count} problems.")
+            console.print(f"Verified {verified_count} problems. Needs evidence: {needs_evidence_count}. Rejected: {rejected_count}.")
             
     run_async(_run())
 
 @analyze_app.command("research")
-def research_problems(limit: int = typer.Option(5, help="Number of verified problems to research")):
-    """Run the multi-agent research pipeline on verified problems."""
+def research_problems(
+    limit: int = typer.Option(5, help="Number of highest-priority candidates to research"),
+    include_needs_evidence: bool = typer.Option(True, help="Research promising candidates that still need corroboration."),
+):
+    """Research the strongest evidence-backed candidates, not only fully verified ones."""
     console.print(f"Starting Phase 2 Research Pipeline for up to {limit} problems...")
     
     async def _run():
@@ -523,13 +537,22 @@ def research_problems(limit: int = typer.Option(5, help="Number of verified prob
                 console.print(f"[red]Budget exceeded![/red] Total cost: ${total_cost:.4f} >= ${settings.max_cost_per_run_usd:.2f}")
                 return
             
-            # Find verified problems that don't have ProblemResearch yet
-            stmt = select(Problem).outerjoin(ProblemResearch).where(ProblemResearch.id == None).where(Problem.verified == True).limit(limit)
+            # A candidate can be worth researching before it is fully proven.
+            # Research creates a validation brief; verification still controls
+            # how much confidence users should place in the result.
+            eligible_statuses = ["verified"]
+            if include_needs_evidence:
+                eligible_statuses.append("needs_evidence")
+            stmt = (
+                select(Problem)
+                .outerjoin(ProblemResearch)
+                .where(ProblemResearch.id == None, Problem.status.in_(eligible_statuses))
+            )
             result = await session.execute(stmt)
-            problems = result.scalars().all()
+            problems = sorted(result.scalars().all(), key=research_priority, reverse=True)[:limit]
             
             if not problems:
-                console.print("No un-researched problems found.")
+                console.print("No eligible un-researched candidates found.")
                 return
                 
             run = ResearchRun(source_type="research", query=f"Researching {len(problems)} problems")
@@ -542,6 +565,7 @@ def research_problems(limit: int = typer.Option(5, help="Number of verified prob
             
             for prob in track(problems, description="Researching..."):
                 try:
+                    console.print(f"[dim]Priority {research_priority(prob):.2f} | status: {prob.status}[/dim]")
                     res = await research_problem(session, prob, run_id=run_id)
                     if res:
                         researched_count += 1
@@ -641,12 +665,14 @@ def score_opportunities():
     
     async def _run():
         async with session_scope() as session:
-            # Score only validated problems whose research has completed.
+            # Score all researched candidates.  The score retains a separate
+            # evidence confidence value so early hypotheses are not presented
+            # as validated opportunities.
             stmt = (
                 select(Problem)
                 .outerjoin(Opportunity)
                 .join(ProblemResearch)
-                .where(Opportunity.id == None, Problem.verified == True)
+                .where(Opportunity.id == None)
             )
             result = await session.execute(stmt)
             problems = result.scalars().all()
@@ -685,7 +711,7 @@ def score_opportunities():
                     problem_id=prob.id,
                     title=f"Opportunity: {prob.title}",
                     description=prob.description,
-                    status="scored"
+                    status="scored" if prob.verified else "validation_needed"
                 )
                 session.add(opp)
                 await session.flush()
@@ -702,6 +728,7 @@ def score_opportunities():
                     technical=score_dict["dimensions"]["technical"]["score"],
                     final_score=score_dict["final_score"],
                     evidence_confidence=score_dict["confidence"],
+                    source_diversity=score_dict["ledger"]["platforms_covered"],
                     breakdown_json=score_dict
                 )
                 session.add(score)

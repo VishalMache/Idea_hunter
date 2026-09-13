@@ -1,4 +1,5 @@
 import asyncio
+import math
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from rich.console import Console
@@ -6,6 +7,23 @@ from idea_hunter.db.models import Problem, ProblemEvidence, Observation, Problem
 from idea_hunter.llm.router import model_router
 
 console = Console()
+
+
+def research_priority(problem: Problem) -> float:
+    """Rank candidates by signal strength without pretending weak evidence is proof."""
+    details = problem.verification_details or {}
+    severity = (problem.severity or 5) / 10
+    frequency = (problem.frequency or 5) / 10
+    evidence_count = min(1.0, details.get("evidence_count", 0) / 3)
+    source_count = min(1.0, details.get("source_count", 0) / 2)
+    engagement = min(1.0, math.log1p(details.get("max_engagement", 0)) / math.log(26))
+    return round(
+        0.45 * ((severity + frequency) / 2)
+        + 0.25 * evidence_count
+        + 0.20 * source_count
+        + 0.10 * engagement,
+        4,
+    )
 
 async def research_problem(session: AsyncSession, problem: Problem, run_id: int = None) -> ProblemResearch:
     """Runs the multi-agent research pipeline on a single problem and saves it to ProblemResearch."""
@@ -16,7 +34,9 @@ async def research_problem(session: AsyncSession, problem: Problem, run_id: int 
         .join(ProblemEvidence, ProblemEvidence.observation_id == Observation.id)
         .where(ProblemEvidence.problem_id == problem.id)
     )
-    evidence_texts = [row[0] for row in result.all()]
+    # Bound the context so a very large cluster does not make research slower,
+    # more expensive, or less focused.  The raw evidence remains in the DB.
+    evidence_texts = [row[0][:1_500] for row in result.all()[:8]]
     
     if not evidence_texts:
         console.print(f"[yellow]Skipping Problem {problem.id}: No evidence found.[/yellow]")

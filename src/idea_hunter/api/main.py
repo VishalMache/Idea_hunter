@@ -86,6 +86,32 @@ async def list_recent_problems(limit: int = 12, db: AsyncSession = Depends(get_d
         "created_at": problem.created_at,
     } for problem in rows]}
 
+@app.get("/api/problems")
+async def list_all_problems(limit: int = 500, db: AsyncSession = Depends(get_db_session)):
+    """Return the complete structured-problem inventory for the Candidates view."""
+    stmt = (
+        select(Problem, ProblemResearch.id)
+        .outerjoin(ProblemResearch, ProblemResearch.problem_id == Problem.id)
+        .order_by(Problem.created_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).all()
+    return {"problems": [{
+        "id": problem.id,
+        "title": problem.title,
+        "description": problem.description,
+        "severity": problem.severity,
+        "frequency": problem.frequency,
+        "verified": problem.verified,
+        "status": problem.status,
+        "verification_reason": problem.verification_reason,
+        "verification_details": problem.verification_details,
+        "verification_attempts": problem.verification_attempts,
+        "signal_type": problem.signal_type,
+        "has_research": research_id is not None,
+        "created_at": problem.created_at,
+    } for problem, research_id in rows]}
+
 @app.get("/api/observations")
 async def list_observations(limit: int = 100, db: AsyncSession = Depends(get_db_session)):
     stmt = select(Observation).order_by(Observation.collected_at.desc()).limit(limit)
@@ -122,8 +148,10 @@ async def list_opportunities(db: AsyncSession = Depends(get_db_session)):
             score.growth, score.wtp, score.market_size,
             score.competition_gap, score.distribution, score.technical
         ] if v is None)
-        if score:
-            stage_status = "Scored opportunity"
+        if score and prob.verified:
+            stage_status = "Validated and scored"
+        elif score:
+            stage_status = "Scored hypothesis — needs validation"
         elif research:
             stage_status = "Researched — awaiting score"
         elif prob.verified:
@@ -136,6 +164,9 @@ async def list_opportunities(db: AsyncSession = Depends(get_db_session)):
             "problem_id": prob.id,
             "title": prob.title,
             "score": score.final_score if score else None,
+            "potential_score": (score.breakdown_json or {}).get("potential_score") if score else None,
+            "evidence_confidence": score.evidence_confidence if score else None,
+            "recommendation": (score.breakdown_json or {}).get("recommendation") if score else None,
             "severity": prob.severity,
             "frequency": prob.frequency,
             "unresearched_count": unresearched_count,
@@ -154,7 +185,15 @@ async def get_problem_details(problem_id: int, db: AsyncSession = Depends(get_db
         return {"error": "Problem not found"}
         
     sol_res = await db.execute(select(ExistingSolution).where(ExistingSolution.problem_id == problem_id))
-    solutions = [{"name": s.name, "gap_notes": s.gap_notes} for s in sol_res.scalars().all()]
+    solutions = [{"name": s.name, "url": s.url, "gap_notes": s.gap_notes} for s in sol_res.scalars().all()]
+
+    research = await db.scalar(select(ProblemResearch).where(ProblemResearch.problem_id == problem_id))
+    score_stmt = (
+        select(OpportunityScore)
+        .join(Opportunity, Opportunity.id == OpportunityScore.opportunity_id)
+        .where(Opportunity.problem_id == problem_id)
+    )
+    score = await db.scalar(score_stmt)
     
     ev_stmt = (
         select(Observation)
@@ -162,16 +201,50 @@ async def get_problem_details(problem_id: int, db: AsyncSession = Depends(get_db
         .where(ProblemEvidence.problem_id == problem_id)
     )
     ev_res = await db.execute(ev_stmt)
-    evidence = [{"text": o.raw_text, "source": o.source_url or "unknown", "engagement": o.engagement} for o in ev_res.scalars().all()]
+    evidence = [{
+        "text": o.raw_text,
+        "source": o.source_url or "unknown",
+        "author": o.author,
+        "engagement": o.engagement or 0,
+        "published_at": o.published_at,
+    } for o in ev_res.scalars().all()]
     
     return {
         "problem": {
+            "id": prob.id,
             "title": prob.title,
             "description": prob.description,
+            "user_segment": prob.user_segment,
+            "industry": prob.industry,
+            "severity": prob.severity,
+            "frequency": prob.frequency,
+            "workaround": prob.workaround,
+            "signal_type": prob.signal_type,
+            "status": prob.status,
+            "verified": prob.verified,
+            "verification_reason": prob.verification_reason,
+            "verification_details": prob.verification_details,
+            "verification_attempts": prob.verification_attempts,
             "devils_advocate": prob.devils_advocate_notes
         },
         "solutions": solutions,
-        "evidence": evidence
+        "evidence": evidence,
+        "research": research and {
+            "customer_analysis": research.customer_analysis,
+            "market_research": research.market_research,
+            "technical_feasibility": research.technical_feasibility,
+            "distribution_difficulty": research.distribution_difficulty,
+            "why_now": research.why_now,
+            "bull_case": research.bull_case,
+            "bear_case": research.bear_case,
+            "debate_verdict": research.debate_verdict,
+        },
+        "score": score and {
+            "final_score": score.final_score,
+            "evidence_confidence": score.evidence_confidence,
+            "source_diversity": score.source_diversity,
+            "breakdown": score.breakdown_json,
+        }
     }
 
 @app.post("/api/feedback/{problem_id}")

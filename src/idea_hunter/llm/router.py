@@ -14,6 +14,14 @@ from idea_hunter.llm.prompts import (
 )
 from idea_hunter.config import settings
 
+RESEARCH_EVIDENCE_POLICY = """
+Evidence policy: the supplied user observations are the only primary evidence.
+Do not present unsupported market sizes, competitors, pricing, regulations, or
+customer behavior as established fact. Label general-knowledge conclusions as
+"hypothesis" and use "unknown" where the evidence cannot support a claim.
+Prefer a concrete next validation action over invented precision.
+"""
+
 class ModelRouter:
     """Routes tasks to the appropriate model based on complexity."""
     
@@ -62,7 +70,7 @@ class ModelRouter:
         )
 
     async def analyze_customer(self, problem_title: str, problem_desc: str, evidence: list[str], run_id: int = None) -> CustomerAnalysis:
-        prompt = f"Problem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
+        prompt = RESEARCH_EVIDENCE_POLICY + f"\nProblem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
         model_name = settings.openrouter_model if hasattr(hosted_client, 'client') else None
         return await hosted_client.generate_structured(
             prompt=prompt, system_prompt=CUSTOMER_RESEARCH_SYSTEM_PROMPT,
@@ -70,7 +78,7 @@ class ModelRouter:
         )
 
     async def analyze_market(self, problem_title: str, problem_desc: str, evidence: list[str], run_id: int = None) -> MarketResearch:
-        prompt = f"Problem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
+        prompt = RESEARCH_EVIDENCE_POLICY + f"\nProblem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
         model_name = settings.openrouter_model if hasattr(hosted_client, 'client') else None
         return await hosted_client.generate_structured(
             prompt=prompt, system_prompt=MARKET_RESEARCH_SYSTEM_PROMPT,
@@ -78,7 +86,7 @@ class ModelRouter:
         )
 
     async def analyze_technical(self, problem_title: str, problem_desc: str, evidence: list[str], run_id: int = None) -> TechnicalAssessment:
-        prompt = f"Problem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
+        prompt = RESEARCH_EVIDENCE_POLICY + f"\nProblem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
         model_name = settings.openrouter_model if hasattr(hosted_client, 'client') else None
         return await hosted_client.generate_structured(
             prompt=prompt, system_prompt=TECHNICAL_FEASIBILITY_SYSTEM_PROMPT,
@@ -86,7 +94,7 @@ class ModelRouter:
         )
 
     async def analyze_distribution(self, problem_title: str, problem_desc: str, evidence: list[str], run_id: int = None) -> DistributionAssessment:
-        prompt = f"Problem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
+        prompt = RESEARCH_EVIDENCE_POLICY + f"\nProblem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
         model_name = settings.openrouter_model if hasattr(hosted_client, 'client') else None
         return await hosted_client.generate_structured(
             prompt=prompt, system_prompt=DISTRIBUTION_DIFFICULTY_SYSTEM_PROMPT,
@@ -94,7 +102,7 @@ class ModelRouter:
         )
 
     async def analyze_why_now(self, problem_title: str, problem_desc: str, evidence: list[str], run_id: int = None) -> WhyNowAssessment:
-        prompt = f"Problem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
+        prompt = RESEARCH_EVIDENCE_POLICY + f"\nProblem: {problem_title}\nDescription: {problem_desc}\n\nEvidence:\n" + "\n\n---\n\n".join(evidence)
         model_name = settings.openrouter_model if hasattr(hosted_client, 'client') else None
         return await hosted_client.generate_structured(
             prompt=prompt, system_prompt=WHY_NOW_SYSTEM_PROMPT,
@@ -105,7 +113,7 @@ class ModelRouter:
                                    customer: CustomerAnalysis, market: MarketResearch, 
                                    tech: TechnicalAssessment, dist: DistributionAssessment, 
                                    why_now: WhyNowAssessment, run_id: int = None) -> BullBearDebate:
-        prompt = (f"Problem: {problem_title}\nDescription: {problem_desc}\n\n"
+        prompt = (RESEARCH_EVIDENCE_POLICY + f"\nProblem: {problem_title}\nDescription: {problem_desc}\n\n"
                   f"Customer Agent:\n{customer.model_dump_json(indent=2)}\n\n"
                   f"Market Agent:\n{market.model_dump_json(indent=2)}\n\n"
                   f"Technical Agent:\n{tech.model_dump_json(indent=2)}\n\n"

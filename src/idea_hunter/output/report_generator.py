@@ -47,8 +47,10 @@ class MarkdownReportGenerator:
                 
                 report_lines.extend([
                     f"## {rank}. {prob.title}",
-                    f"**OPPORTUNITY SCORE:** `{int(score.final_score * 100)} / 100`",
+                    f"**Evidence-adjusted score:** `{int(score.final_score * 100)} / 100`",
+                    f"**Opportunity potential:** `{int(bd.get('potential_score', score.final_score) * 100)} / 100`",
                     f"**Confidence:** {int(score.evidence_confidence * 100)}%",
+                    f"**Next step:** {bd.get('recommendation', 'Validate the evidence before committing to a build.')}",
                     ""
                 ])
                 
@@ -79,6 +81,7 @@ class MarkdownReportGenerator:
                         f"Pricing evidence signals: {ledger.get('pricing_signals', 0)}",
                         f"Recent signals (30 days): {ledger.get('recent_signals', 0)}",
                         f"Evidence Confidence:      {int(score.evidence_confidence * 100)}%",
+                        f"Opportunity Potential:    {int(ledger.get('potential_score', score.final_score) * 100)}%",
                         "```",
                         ""
                     ])

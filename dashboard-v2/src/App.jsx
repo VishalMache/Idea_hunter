@@ -28,7 +28,7 @@ function App() {
         fetch(`${API_URL}/stats`),
         fetch(`${API_URL}/opportunities`),
         fetch(`${API_URL}/pipeline`),
-        fetch(`${API_URL}/problems/recent`)
+        fetch(`${API_URL}/problems?limit=500`)
       ]);
       const statsData = await statsRes.json();
       const oppsData = await oppsRes.json();
@@ -128,29 +128,27 @@ function App() {
 
         {activeTab === 'pipeline' && (
           <section>
-            <p className="section-copy">Watch each stage populate as the command runs. Counts come directly from PostgreSQL.</p>
-            <div className="pipeline-grid">
+            <div className="workflow-summary"><div><p className="section-copy">A live view of how research agents move signals from collection to validated opportunity.</p><div className="workflow-legend"><span><i className="legend-dot is-complete" />Complete</span><span><i className="legend-dot is-active" />Processing</span><span><i className="legend-dot is-waiting" />Waiting</span></div></div><div className="run-state"><span className="pulse-dot" />Agent loop active<span className="run-divider" />4s sync</div></div>
+            <div className="workflow-shell"><div className="workflow-line" /><div className="workflow-grid">
               {pipeline.map((stage, index) => (
-                <div className={`pipeline-stage ${stage.state}`} key={stage.id}>
-                  <div className="stage-topline"><span className="stage-number">{String(index + 1).padStart(2, '0')}</span>{stage.state === 'complete' ? <CheckCircle2 size={18} /> : <Clock3 size={18} />}</div>
-                  <h3>{stage.label}</h3>
-                  <strong>{stage.value.toLocaleString()} <span>/ {stage.total.toLocaleString()}</span></strong>
-                  <p>{stage.detail}</p>
+                <div className={`workflow-node ${stage.state}`} key={stage.id}>
+                  <div className="node-marker"><span>{String(index + 1).padStart(2, '0')}</span>{stage.state === 'complete' ? <CheckCircle2 size={15} /> : <Clock3 size={15} />}</div><div className="node-card"><div className="node-kicker">{stage.state === 'complete' ? 'HANDOFF READY' : stage.state === 'active' ? 'AGENT WORKING' : 'QUEUED'}</div>
+                  <h3>{stage.label}</h3><strong>{stage.value.toLocaleString()} <span>/ {stage.total.toLocaleString()}</span></strong><p>{stage.detail}</p>
                   <div className="stage-track"><i style={{ width: `${stage.total ? Math.min(100, (stage.value / stage.total) * 100) : 0}%` }} /></div>
-                </div>
+                  </div></div>
               ))}
-            </div>
+            </div><aside className="workflow-aside"><div className="aside-heading"><span>RUN TELEMETRY</span><Activity size={14} /></div><div className="telemetry-value">{stats.opportunities}<small> opportunities surfaced</small></div><p>Signals are being scored against frequency, severity, and evidence quality.</p><div className="telemetry-row"><span>Last handoff</span><b>{lastUpdated ? lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</b></div><div className="telemetry-row"><span>System health</span><b className="health-good">Nominal</b></div></aside></div>
           </section>
         )}
 
         {activeTab === 'candidates' && (
           <section>
-            <p className="section-copy">Newest extracted problems, including candidates that are awaiting verification or research.</p>
+            <p className="section-copy">All structured problems extracted from the pipeline, including candidates awaiting evidence or research. Showing {recentProblems.length}.</p>
             <div className="candidate-list">
               {recentProblems.map(problem => (
                 <article className="candidate-row" key={problem.id}>
-                  <div><p className="candidate-title">{problem.title}</p><span>Severity {problem.severity || '—'} · Frequency {problem.frequency || '—'} · {problem.signal_type}</span></div>
-                  <span className={`status-pill ${problem.verified ? 'verified' : 'pending'}`}>{problem.verified ? 'Verified' : 'Awaiting verification'}</span>
+                  <div onClick={() => setSelectedOpp({ ...problem, problem_id: problem.id, title: problem.title })} style={{ flex: 1, cursor: 'pointer' }}><p className="candidate-title">#{problem.id} · {problem.title}</p><span>Severity {problem.severity || '—'} · Frequency {problem.frequency || '—'} · {problem.signal_type}{problem.verification_reason ? ` · ${problem.verification_reason}` : ''}</span></div>
+                  <span className={`status-pill ${problem.verified ? 'verified' : 'pending'}`}>{problem.has_research ? 'Researched' : problem.verified ? 'Verified' : problem.status === 'needs_evidence' ? 'Needs evidence' : problem.status}</span>
                 </article>
               ))}
             </div>
