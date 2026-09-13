@@ -246,16 +246,25 @@ def embed_observations(limit: int = typer.Option(500, help="Number of observatio
                 console.print("No new observations to embed.")
                 return
                 
-            console.print(f"Embedding {len(observations)} observations...")
-            texts = [obs.raw_text for obs in observations]
+            console.print(f"Embedding {len(observations)} observations in chunks...")
+            chunk_size = 10
+            embedded_count = 0
             
-            # This uses local Ollama via nomic-embed-text
-            embeddings = await embedder.embed_batch(texts)
-            
-            for obs, emb in zip(observations, embeddings):
-                obs.embedding = emb
+            for i in range(0, len(observations), chunk_size):
+                chunk_obs = observations[i:i + chunk_size]
+                texts = [obs.raw_text for obs in chunk_obs]
                 
-            console.print(f"[bold green]Successfully embedded {len(observations)} items.[/bold green]")
+                # Process this chunk
+                embeddings = await embedder.embed_batch(texts)
+                
+                for obs, emb in zip(chunk_obs, embeddings):
+                    obs.embedding = emb
+                    
+                await session.flush()
+                embedded_count += len(chunk_obs)
+                console.print(f"Embedded {embedded_count}/{len(observations)}...")
+                
+            console.print(f"[bold green]Successfully embedded {embedded_count} items.[/bold green]")
             
     run_async(_run())
 
@@ -280,19 +289,25 @@ def cluster_observations():
             # Step 1: PGVector merging
             merged_count = 0
             unmerged_observations = []
+            existing_stmt = select(Observation.cluster_id, Observation.embedding).where(
+                Observation.cluster_id.is_not(None)
+            )
+            existing_clusters = (await session.execute(existing_stmt)).all()
             
             for obs in observations:
-                # Find nearest clustered observation
-                nn_stmt = (
-                    select(Observation.cluster_id, Observation.embedding.cosine_distance(obs.embedding).label("dist"))
-                    .where(Observation.cluster_id.is_not(None))
-                    .order_by("dist")
-                    .limit(1)
+                # Compare in Python so this works with both legacy JSON and
+                # pgvector-backed embedding columns.
+                nn_row = min(
+                    existing_clusters,
+                    key=lambda candidate: clusterer.cosine_distance(obs.embedding, candidate.embedding),
+                    default=None,
                 )
-                nn_res = await session.execute(nn_stmt)
-                nn_row = nn_res.first()
+                distance = (
+                    clusterer.cosine_distance(obs.embedding, nn_row.embedding)
+                    if nn_row else None
+                )
                 
-                if nn_row and nn_row.dist < 0.2: # 0.2 is the cosine distance threshold (higher similarity)
+                if nn_row and distance < 0.2: # 0.2 is the cosine distance threshold (higher similarity)
                     obs.cluster_id = nn_row.cluster_id
                     merged_count += 1
                     
@@ -422,11 +437,18 @@ def extract_problems(limit: int = typer.Option(10, help="Number of clusters to p
                             session.add(evidence)
                             
                         if competition:
-                            for sol_name in competition.competitors:
+                            for competitor in competition.competitors:
                                 sol = ExistingSolution(
                                     problem_id=problem.id,
-                                    name=sol_name,
-                                    gap_notes=f"Gap: {competition.market_gap}\nWhy they fail: {competition.why_they_fail}"
+                                    name=competitor.name,
+                                    url=competitor.url,
+                                    gap_notes=(
+                                        f"Gap: {competition.market_gap}\n"
+                                        f"Why they fail: {competition.why_they_fail}\n"
+                                        f"Pricing: {competitor.pricing_tier}\n"
+                                        f"Customers: {competitor.estimated_customers}\n"
+                                        f"Weaknesses: {competitor.weaknesses}"
+                                    )
                                 )
                                 session.add(sol)
                         else:
@@ -619,8 +641,13 @@ def score_opportunities():
     
     async def _run():
         async with session_scope() as session:
-            # Find problems that haven't been scored yet and are verified
-            stmt = select(Problem).outerjoin(Opportunity).where(Opportunity.id == None).where(Problem.verified == True)
+            # Score only validated problems whose research has completed.
+            stmt = (
+                select(Problem)
+                .outerjoin(Opportunity)
+                .join(ProblemResearch)
+                .where(Opportunity.id == None, Problem.verified == True)
+            )
             result = await session.execute(stmt)
             problems = result.scalars().all()
             

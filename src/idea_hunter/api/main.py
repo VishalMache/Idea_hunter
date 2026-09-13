@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from idea_hunter.db.engine import get_db_session
-from idea_hunter.db.models import Problem, Opportunity, OpportunityScore, Observation, ProblemEvidence, ExistingSolution, UserFeedback
+from idea_hunter.db.models import Problem, Opportunity, OpportunityScore, Observation, ProblemEvidence, ExistingSolution, UserFeedback, ProblemResearch
 from pydantic import BaseModel
 
 class FeedbackRequest(BaseModel):
@@ -28,6 +28,64 @@ async def get_stats(db: AsyncSession = Depends(get_db_session)):
     
     return {"status": "running", "observations": obs_count, "problems": prob_count, "opportunities": opp_count}
 
+@app.get("/api/pipeline")
+async def get_pipeline_status(db: AsyncSession = Depends(get_db_session)):
+    """Return live, database-backed progress for each pipeline stage."""
+    async def count(statement):
+        return await db.scalar(statement) or 0
+
+    observations = await count(select(func.count(Observation.id)))
+    passed = await count(select(func.count(Observation.id)).where(Observation.passed_prefilter.is_(True)))
+    embedded = await count(select(func.count(Observation.id)).where(Observation.embedding.is_not(None)))
+    clustered = await count(select(func.count(Observation.id)).where(Observation.cluster_id.is_not(None)))
+    clusters = await count(
+        select(func.count(func.distinct(Observation.cluster_id))).where(Observation.cluster_id.is_not(None))
+    )
+    extracted_clusters = await count(
+        select(func.count(func.distinct(Observation.cluster_id)))
+        .select_from(Observation)
+        .join(ProblemEvidence, Observation.id == ProblemEvidence.observation_id)
+        .where(Observation.cluster_id.is_not(None))
+    )
+    problems = await count(select(func.count(Problem.id)))
+    verified = await count(select(func.count(Problem.id)).where(Problem.verified.is_(True)))
+    researched = await count(select(func.count(ProblemResearch.id)))
+    scored = await count(select(func.count(Opportunity.id)))
+
+    def stage(stage_id, label, value, total, detail):
+        state = "complete" if total and value >= total else "waiting"
+        if value and value < total:
+            state = "active"
+        return {"id": stage_id, "label": label, "value": value, "total": total, "state": state, "detail": detail}
+
+    return {
+        "stages": [
+            stage("collect", "Collect", observations, observations, f"{observations} observations saved"),
+            stage("embed", "Embed", embedded, passed, f"{embedded} of {passed} signals embedded"),
+            stage("cluster", "Cluster", clustered, embedded, f"{clustered} observations assigned to clusters"),
+            stage("extract", "Extract", extracted_clusters, clusters, f"{problems} structured problems extracted"),
+            stage("verify", "Verify", verified, problems, f"{verified} problems passed evidence checks"),
+            stage("research", "Research", researched, verified, f"{researched} multi-agent research reports"),
+            stage("score", "Score", scored, max(researched, scored), f"{scored} ranked opportunities"),
+        ],
+        "updated_at": "live",
+    }
+
+@app.get("/api/problems/recent")
+async def list_recent_problems(limit: int = 12, db: AsyncSession = Depends(get_db_session)):
+    stmt = select(Problem).order_by(Problem.created_at.desc()).limit(limit)
+    rows = (await db.execute(stmt)).scalars().all()
+    return {"problems": [{
+        "id": problem.id,
+        "title": problem.title,
+        "severity": problem.severity,
+        "frequency": problem.frequency,
+        "verified": problem.verified,
+        "status": problem.status,
+        "signal_type": problem.signal_type,
+        "created_at": problem.created_at,
+    } for problem in rows]}
+
 @app.get("/api/observations")
 async def list_observations(limit: int = 100, db: AsyncSession = Depends(get_db_session)):
     stmt = select(Observation).order_by(Observation.collected_at.desc()).limit(limit)
@@ -49,29 +107,39 @@ async def list_observations(limit: int = 100, db: AsyncSession = Depends(get_db_
 @app.get("/api/opportunities")
 async def list_opportunities(db: AsyncSession = Depends(get_db_session)):
     stmt = (
-        select(Opportunity, OpportunityScore, Problem)
-        .join(OpportunityScore, Opportunity.id == OpportunityScore.opportunity_id)
-        .join(Problem, Opportunity.problem_id == Problem.id)
-        .order_by(OpportunityScore.final_score.desc())
+        select(Problem, Opportunity, OpportunityScore, ProblemResearch)
+        .outerjoin(Opportunity, Opportunity.problem_id == Problem.id)
+        .outerjoin(OpportunityScore, Opportunity.id == OpportunityScore.opportunity_id)
+        .outerjoin(ProblemResearch, ProblemResearch.problem_id == Problem.id)
+        .order_by(OpportunityScore.final_score.desc().nullslast(), Problem.created_at.desc())
     )
     result = await db.execute(stmt)
     rows = result.all()
     
     data = []
-    for opp, score, prob in rows:
-        unresearched_count = sum(1 for v in [
-            score.growth, score.wtp, score.market_size, 
+    for prob, opp, score, research in rows:
+        unresearched_count = 0 if not score else sum(1 for v in [
+            score.growth, score.wtp, score.market_size,
             score.competition_gap, score.distribution, score.technical
         ] if v is None)
+        if score:
+            stage_status = "Scored opportunity"
+        elif research:
+            stage_status = "Researched — awaiting score"
+        elif prob.verified:
+            stage_status = "Verified — awaiting research"
+        else:
+            stage_status = "Candidate — awaiting verification"
         
         data.append({
-            "id": opp.id,
+            "id": opp.id if opp else f"problem-{prob.id}",
             "problem_id": prob.id,
             "title": prob.title,
-            "score": score.final_score,
+            "score": score.final_score if score else None,
             "severity": prob.severity,
             "frequency": prob.frequency,
             "unresearched_count": unresearched_count,
+            "stage_status": stage_status,
             "description": prob.description,
             "target_user": prob.user_segment,
             "workaround": prob.workaround,

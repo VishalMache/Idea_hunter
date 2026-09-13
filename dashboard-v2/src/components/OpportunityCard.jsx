@@ -1,12 +1,14 @@
 import React from 'react';
-import { AlertCircle, Clock } from 'lucide-react';
+import { AlertCircle, Clock, CircleDot } from 'lucide-react';
 import './OpportunityCard.css';
 
 export default function OpportunityCard({ opp, onClick }) {
   return (
     <div className="opp-card" onClick={onClick}>
       <div className="opp-card-header">
-        <div className="opp-score">{(opp.score * 100).toFixed(0)}% Match</div>
+        <div className={`opp-score ${opp.score == null ? 'candidate-score' : ''}`}>
+          {opp.score == null ? <><CircleDot size={12} /> Candidate</> : `${(opp.score * 100).toFixed(0)}% Match`}
+        </div>
         {opp.unresearched_count > 0 && (
           <div className="opp-score" style={{ color: 'var(--text-muted)', borderColor: 'var(--border-subtle)', background: 'transparent' }}>
             {opp.unresearched_count} Unresearched Dims
@@ -15,6 +17,7 @@ export default function OpportunityCard({ opp, onClick }) {
       </div>
       
       <h3 className="opp-title">{opp.title}</h3>
+      <div className="opp-status">{opp.stage_status}</div>
       <p className="opp-desc">{opp.description}</p>
       
       <div className="opp-metrics">

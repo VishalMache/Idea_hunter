@@ -69,6 +69,27 @@
   padding-bottom: 48px;
 }
 
+.dashboard-title { display: flex; justify-content: space-between; align-items: end; margin-bottom: 28px; }
+.dashboard-title h2 { font-size: 2rem; margin: 4px 0 0; }
+.eyebrow { margin: 0; color: #66e3b4; font-size: .7rem; font-weight: 700; letter-spacing: .12em; }
+.live-indicator { display: flex; gap: 7px; align-items: center; color: var(--text-muted); font-size: .78rem; }
+.section-header h2 { cursor: pointer; color: var(--text-muted); transition: color .2s; }
+.section-header h2.active-tab { color: var(--text-primary); }
+.section-copy { color: var(--text-secondary); margin: -10px 0 22px; }
+.pipeline-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(205px, 1fr)); gap: 14px; }
+.pipeline-stage { min-height: 185px; padding: 20px; border: 1px solid var(--border-color); border-radius: 12px; background: var(--panel-bg); }
+.pipeline-stage.complete { border-color: rgba(102, 227, 180, .45); }
+.pipeline-stage.active { border-color: #d9bd77; }
+.stage-topline { display: flex; justify-content: space-between; color: var(--text-muted); }
+.pipeline-stage.complete .stage-topline svg { color: #66e3b4; }
+.stage-number { font-size: .72rem; letter-spacing: .1em; }
+.pipeline-stage h3 { margin: 20px 0 8px; font-size: 1rem; }
+.pipeline-stage strong { font-size: 1.45rem; }.pipeline-stage strong span { font-size: .85rem; color: var(--text-muted); font-weight: 400; }
+.pipeline-stage p { min-height: 34px; color: var(--text-secondary); font-size: .76rem; line-height: 1.45; }
+.stage-track { height: 4px; border-radius: 10px; background: var(--border-color); overflow: hidden; }.stage-track i { display: block; height: 100%; background: #66e3b4; }
+.candidate-list { display: flex; flex-direction: column; gap: 10px; }.candidate-row { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 18px 20px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--panel-bg); }.candidate-title { margin: 0 0 6px; color: var(--text-primary); font-weight: 600; }.candidate-row span { color: var(--text-muted); font-size: .8rem; }.status-pill { white-space: nowrap; border-radius: 999px; padding: 5px 9px; }.status-pill.verified { color: #66e3b4; background: rgba(102, 227, 180, .12); }.status-pill.pending { color: #d9bd77; background: rgba(217, 189, 119, .12); }
+@media (max-width: 640px) { .dashboard-title, .candidate-row { align-items: flex-start; flex-direction: column; }.stats-group { gap: 10px; }.stat-label { display: none; } }
+
 .section-header {
   margin-bottom: 32px;
 }

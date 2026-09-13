@@ -4,6 +4,23 @@ from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text, JSON,
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 
+
+class CompatibleVector(Vector):
+    """Accept vector values returned by asyncpg's native codec or as text."""
+
+    cache_ok = True
+
+    def result_processor(self, dialect, coltype):
+        parent_processor = super().result_processor(dialect, coltype)
+
+        def process(value):
+            if value is None or isinstance(value, list):
+                return value
+            return parent_processor(value)
+
+        return process
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -33,7 +50,7 @@ class Observation(Base):
     topic: Mapped[Optional[str]] = mapped_column(String(255))
     country: Mapped[Optional[str]] = mapped_column(String(2))
     cluster_id: Mapped[Optional[int]] = mapped_column(Integer, index=True)
-    embedding = mapped_column(Vector(768))
+    embedding = mapped_column(CompatibleVector(768))
     passed_prefilter: Mapped[Optional[bool]] = mapped_column(default=None)
 
     source: Mapped["Source"] = relationship()

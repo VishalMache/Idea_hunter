@@ -1,283 +1,494 @@
-# IDEA HUNTER — System Documentation
+# Idea Hunter — How It Works
 
-> A local, privacy-first **Opportunity Intelligence Engine** that automatically harvests user complaints from the internet, clusters them by theme, extracts structured problems using AI, scores them for startup viability, and surfaces them through a web dashboard.
+> **A local AI-powered pipeline that crawls the internet for pain points, clusters them into validated problems, researches them with a multi-agent LLM system, and scores them as startup opportunities.**
 
 ---
 
-## How the Pipeline Works (End-to-End)
+## Table of Contents
 
-Below is the full flow from raw internet data to a scored startup opportunity, in exact execution order.
+1. [The Big Picture](#1-the-big-picture)
+2. [Architecture Overview](#2-architecture-overview)
+3. [The 7-Step Pipeline](#3-the-7-step-pipeline)
+   - [Step 1: Collect](#step-1-collect)
+   - [Step 2: Embed](#step-2-embed)
+   - [Step 3: Cluster](#step-3-cluster)
+   - [Step 4: Extract](#step-4-extract)
+   - [Step 5: Research (Multi-Agent)](#step-5-research-multi-agent)
+   - [Step 6: Score](#step-6-score)
+   - [Step 7: Report](#step-7-report)
+4. [Path B — Compound Discovery](#4-path-b--compound-discovery)
+5. [The LLM Stack](#5-the-llm-stack)
+6. [The Database Schema](#6-the-database-schema)
+7. [The API & Dashboard](#7-the-api--dashboard)
+8. [Cost Control System](#8-cost-control-system)
+9. [Configuration Reference](#9-configuration-reference)
+10. [Running the Pipeline](#10-running-the-pipeline)
+
+---
+
+## 1. The Big Picture
+
+Idea Hunter is an **automated opportunity intelligence engine** for founders. It answers one question:
+
+> *"What real problems are people complaining about online that nobody has built a great solution for yet?"*
+
+Instead of manual research, gut-feel, or expensive market research firms, Idea Hunter:
+
+1. **Scrapes** pain signals from HackerNews, Reddit, GitHub Issues, and Play Store reviews.
+2. **Filters** noise at zero LLM cost using keyword heuristics.
+3. **Clusters** similar complaints together using vector embeddings + HDBSCAN.
+4. **Extracts** a structured problem from each cluster using an LLM.
+5. **Researches** each problem with 5 parallel AI agents (Customer, Market, Technical, Distribution, Why Now).
+6. **Debates** the idea with a Bull/Bear Judge agent.
+7. **Scores** and **ranks** opportunities using an evidence-backed scoring model.
+8. **Reports** the top opportunities as a ranked markdown file.
+
+---
+
+## 2. Architecture Overview
 
 ```
-Internet Data Sources
-        │
-        ▼
-   [1] COLLECTORS
-  (hackernews, playstore, github)
-        │
-        ▼
-   [2] PRE-FILTER
-  (keyword + noise check)
-        │
-        ▼
-   [3] DEDUPLICATE
-  (SHA-256 content hash → Postgres ON CONFLICT)
-        │
-        ▼
-   [4] EMBED
-  (Ollama nomic-embed-text → 768-dim vector)
-        │
-        ▼
-   [5] CLUSTER
-  (HDBSCAN on embeddings → thematic groups)
-        │
-        ▼
-   [6] EXTRACT + COMPETITION AGENT
-  (OpenRouter GPT-4o-mini → structured problem + competitor analysis)
-        │
-        ▼
-   [7] VERIFY
-  (Deterministic quality gate → flags weak problems)
-        │
-        ▼
-   [8] SCORE
-  (Weighted formula + source diversity + engagement bonus)
-        │
-        ▼
-   [9] DASHBOARD + REPORT
-  (React Web UI + Markdown file)
+┌─────────────────────────────────────────────────────────────────┐
+│                         SOURCES                                 │
+│   HackerNews   Reddit   GitHub Issues   Play Store Reviews      │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  collect
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  PRE-FILTER  (Zero LLM cost — keyword + regex + engagement)     │
+│  Pain keywords: "frustrated", "workaround", "would pay", etc.   │
+│  Noise patterns: "[deleted]", "lol", bare URLs dropped          │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  pass
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  OBSERVATIONS TABLE  (PostgreSQL + pgvector)                    │
+│  raw_text, content_hash, source_id, engagement, passed_prefilter│
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  embed
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  LOCAL OLLAMA  —  nomic-embed-text  (768-dim vectors)           │
+│  Embeddings stored in pgvector column on observations table     │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  cluster
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  HDBSCAN  →  cluster_id assigned to each observation            │
+│  New observations merged into existing clusters via cosine dist  │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  extract (per cluster)
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  HOSTED LLM  (OpenRouter / OpenAI / Anthropic)                  │
+│  → ExtractedProblem  (title, severity, frequency, workaround)   │
+│  → CompetitionAnalysis  (competitors, gap, why they fail)       │
+│  Saved as Problems + ProblemEvidence + ExistingSolutions        │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  verify
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  VERIFIER  (rule-based quality gates)                           │
+│  severity×frequency >= 25, min 2 evidence observations,         │
+│  at least 1 engaged source or multi-platform signal             │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  research (5 agents in parallel)
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  MULTI-AGENT RESEARCH PIPELINE                                  │
+│  ┌──────────┐ ┌────────┐ ┌────────────┐ ┌──────────┐ ┌───────┐│
+│  │ Customer │ │ Market │ │ Technical  │ │Distribut.│ │WhyNow ││
+│  │  Agent   │ │ Agent  │ │   Agent    │ │  Agent   │ │ Agent ││
+│  └────┬─────┘ └───┬────┘ └─────┬──────┘ └────┬─────┘ └──┬────┘│
+│       └───────────┴────────────┴─────────────┴──────────┘     │
+│                                │ combine                        │
+│                                ▼                                │
+│                    BULL/BEAR JUDGE AGENT                        │
+│                    → verdict: BUILD / VALIDATE / KILL           │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  score
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  EVIDENCE-BACKED SCORER                                         │
+│  Weighted dimensions → final_score (0.0–1.0)                   │
+│  Multiplied by evidence_confidence                              │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  report
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  opportunity_report.md  +  FastAPI REST  +  React Dashboard     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Stage-by-Stage Breakdown
+## 3. The 7-Step Pipeline
 
-### Stage 1 — Collectors
+### Step 1: Collect
 
-**Where:** `src/idea_hunter/collectors/`
+**Command:** `process collect hackernews --query "I hate" --limit 100`
 
-Collectors are responsible for pulling raw text data from the internet. All collectors inherit from `BaseCollector` and yield `RawObservation` objects.
+**Sources:**
 
-| Collector | File | Status | Requires Auth? | Notes |
-|---|---|---|---|---|
-| HackerNews | `hackernews.py` | ✅ Working | No | Uses Algolia free API. Searches HN comments by keyword. Paginated. |
-| Google Play Store | `reviews.py` | ✅ Working | No | Scrapes 1–3 star reviews for apps matching a search query. |
-| GitHub Issues | `github.py` | ⚠️ Built, Untested | Optional (`github_token`) | Searches GitHub Issues for bug reports & feature requests. |
-| Reddit | `reddit.py` | ⚠️ Built, No Credentials | Yes (`reddit_client_id/secret`) | Built using `asyncpraw`. Deferred until Reddit API credentials are available. |
-
-Each `RawObservation` carries: `source_type`, `source_url`, `raw_text`, `author`, `published_at`, `engagement` (upvotes/comments), `topic`, `cursor_value`.
-
----
-
-### Stage 2 — Pre-Filter
-
-**Where:** `src/idea_hunter/processing/prefilter.py`
-
-A cheap, zero-cost gate that runs **before** any embedding or LLM call. It drops obvious noise to save money.
-
-**How it works:**
-1. **Length check** — drops anything under 30 characters.
-2. **Noise patterns** — drops `[deleted]`, posts that are just URLs, quoted/forwarded text, pure laughing reactions.
-3. **Engagement gate** — optionally drops low-engagement posts (configurable `min_engagement`).
-4. **Pain keyword matching** — checks for keywords like: `"frustrated"`, `"hate"`, `"no tool"`, `"would pay"`, `"manual"`, `"missing feature"`, `"spent hours"`, etc. Requires at least 1 match to pass. 3+ matches = max signal score.
-
-Returns a `PrefilterResult(passed, reason, score)`.
-
----
-
-### Stage 3 — Deduplication
-
-**Where:** `src/idea_hunter/processing/deduplicator.py`
-
-Computes a **SHA-256 hash** of the cleaned text. When inserting into PostgreSQL, uses `ON CONFLICT DO NOTHING` on the unique `content_hash` column. This means the same complaint can never be stored twice even across multiple collection runs.
-
----
-
-### Stage 4 — Embedding
-
-**Where:** `src/idea_hunter/processing/embedder.py`
-
-Converts each cleaned observation into a **768-dimensional vector** using **Ollama running locally** with the `nomic-embed-text` model. This runs entirely on your machine — no API cost.
-
-The embedding is stored as JSON in the `observations.embedding` column (for now; a native `pgvector` column can replace this later).
-
----
-
-### Stage 5 — Clustering
-
-**Where:** `src/idea_hunter/analysis/clusterer.py`
-
-Runs **HDBSCAN** (Hierarchical Density-Based Spatial Clustering) on the stored embeddings. Complaints about similar themes naturally cluster together. For example, "hate syncing calendar apps" and "my calendar doesn't work offline" would land in the same cluster.
-
-**Key configuration:**
-- `min_cluster_size = 2` (intentionally low for small datasets)
-- `min_samples = 2`
-- Noise points (cluster label `-1`) are discarded and never extracted
-
-The cluster ID is written back into the `observations.cluster_id` column.
-
----
-
-### Stage 6 — Extraction + Competition Agent
-
-**Where:** `src/idea_hunter/processing/extractor.py`, `src/idea_hunter/llm/router.py`
-
-For each cluster, the engine sends all raw texts to **OpenRouter (`gpt-4o-mini`)** via two chained LLM calls:
-
-**Call 1 — Problem Extractor:**
-Returns a structured `ExtractedProblem`:
-- `problem` — concise title for the core pain
-- `target_user` — who has this problem
-- `context` — when/where it happens
-- `severity` — 1–10 pain score
-- `frequency` — 1–10 how often it occurs
-- `workaround` — what users do today to cope
-- `existing_solutions` — tools they mentioned
-- `devils_advocate_notes` — a strict, falsifiable reason this might NOT be a good startup idea
-- `confidence` — 0.0–1.0 confidence this is a real problem (below 0.3 = discarded)
-
-**Call 2 — Competition Agent:**
-Returns a `CompetitionAnalysis`:
-- `competitors` — specific existing tools/products users are trying
-- `why_they_fail` — the precise reason existing solutions are failing users
-- `market_gap` — what a new entrant could do differently
-
-Both results are saved to the `problems` and `existing_solutions` DB tables.
-
----
-
-### Stage 7 — Verification Gate
-
-**Where:** `src/idea_hunter/processing/verifier.py`
-
-A deterministic, **zero-cost quality check** that runs before scoring. Sets `problem.verified = True` or `problem.status = "flagged"`.
-
-**Rules to pass:**
-1. `severity × frequency >= 25` (e.g., a 5×4 problem would fail, a 7×6 would pass)
-2. At least 2 raw observations in the evidence chain
-3. Either `max_engagement > 0` OR evidence spans more than 1 source
-
-Problems that fail are marked `status = "flagged"` and are **not scored**.
-
----
-
-### Stage 8 — Scoring
-
-**Where:** `src/idea_hunter/analysis/scorer.py`
-
-A deterministic weighted formula (no randomness, fully reproducible):
-
-| Dimension | Weight |
-|---|---|
-| Pain Severity | 20% |
-| Problem Frequency | 15% |
-| Growth Trend | 15% |
-| Willingness to Pay | 15% |
-| Market Size | 10% |
-| Competition Gap | 10% |
-| Distribution Feasibility | 10% |
-| Technical Feasibility | 5% |
-
-**Bonuses applied after the base score:**
-- **Evidence Confidence** multiplier (from LLM, 0.0–1.0)
-- **Source Diversity**: up to +20% if the problem appears across multiple platforms
-- **Engagement**: +10% if `max_engagement > 100`, +5% if `> 10`
-- Final score is capped at 1.0
-
----
-
-### Stage 9 — Output
-
-**Two outputs are generated:**
-
-#### A. Markdown Report (`opportunity_report.md`)
-Generated by `src/idea_hunter/output/report_generator.py`. A static file you can read in any text editor. Contains all scored opportunities ranked by score.
-
-#### B. Web Dashboard (`dashboard-v2/`)
-A React app that talks to the **FastAPI backend** (`src/idea_hunter/api/main.py`).
-
-**API endpoints available:**
-| Method | Endpoint | What it does |
+| Collector | What it scrapes | Key signal |
 |---|---|---|
-| `GET` | `/api/stats` | Overall pipeline health (counts) |
-| `GET` | `/api/observations` | All raw collected observations |
-| `GET` | `/api/opportunities` | All scored opportunities, ranked by score |
-| `GET` | `/api/problems/{id}` | Full deep-dive: evidence chain, solutions, devil's advocate |
-| `POST` | `/api/feedback/{id}` | Accept or reject an opportunity (saved to DB) |
+| `HackerNewsCollector` | Ask HN, Show HN, comment threads | Upvote count as engagement |
+| `RedditCollector` | Posts/comments from target subreddits | Upvotes + comment count |
+| `GitHubCollector` | Open issues with pain keywords | Reactions count |
+| `PlayStoreReviewsCollector` | 1–3 star app reviews | Star rating as negative signal |
 
-**Dashboard views:**
-- **Opportunity Radar** tab — scored cards you can click for deep-dives
-- **Raw Observations** tab — all raw scraped text with source + engagement
+**What happens:**
+1. Each collector fetches raw posts/comments.
+2. Text is cleaned by `TextCleaner` (strips HTML, extra whitespace, etc.).
+3. The **Pre-Filter** runs instantly on every piece of text — zero LLM cost:
+   - Checks for pain keywords: `"frustrated"`, `"workaround"`, `"would pay"`, `"nobody solves"`, `"wish there was"`, etc.
+   - Drops noise patterns: `[deleted]`, `[removed]`, bare URLs, `lol`/`haha` reactions.
+   - Requires minimum text length (30 chars).
+4. Each observation is stored with a **SHA-256 content hash** for deduplication. PostgreSQL `ON CONFLICT DO NOTHING` ensures the same post is never stored twice even across multiple runs.
+5. A `last_seen_cursor` is stored per source to enable **incremental crawling** — next run picks up from where it left off.
+
+**Key field saved:** `passed_prefilter` (boolean) — only `True` records move forward.
 
 ---
 
-## CLI Reference
+### Step 2: Embed
 
-All commands are run inside the `.venv` virtual environment.
+**Command:** `process embed`
+
+**What happens:**
+1. Queries all observations where `passed_prefilter = true AND embedding IS NULL`.
+2. Sends text to **local Ollama** running `nomic-embed-text` (768 dimensions).
+3. Embeddings are processed in chunks of 10 and flushed to PostgreSQL after each chunk (so progress is preserved if interrupted).
+4. Stores the vector in the `embedding` column (pgvector type).
+
+**Why nomic-embed-text?** It's a fast, high-quality embedding model that runs fully locally — no API cost, no data leaving your machine.
+
+---
+
+### Step 3: Cluster
+
+**Command:** `process cluster`
+
+**What happens:**
+1. Loads all observations with embeddings and no `cluster_id` yet.
+2. **Merge phase (pgvector):** For each new observation, computes cosine distance to the nearest already-clustered observation. If distance < 0.2 (high similarity), merges it into that cluster. Also logs a `Trend` entry to track growing clusters.
+3. **HDBSCAN phase:** Any observation that didn't merge runs through HDBSCAN (`min_cluster_size=2`, `min_samples=2`). This creates new clusters from fresh data.
+4. Noise points (HDBSCAN label `-1`) become singleton clusters — they still get processed in extraction.
+5. Each observation gets a `cluster_id` written back.
+
+**Why HDBSCAN?** It's density-based — no need to pre-specify the number of clusters. It naturally finds groups of semantically similar complaints and handles outliers gracefully.
+
+---
+
+### Step 4: Extract
+
+**Command:** `process extract --limit 10`
+
+**What happens per cluster:**
+1. Finds all cluster IDs that don't yet have a `ProblemEvidence` record (i.e., unprocessed clusters).
+2. For each cluster, fetches all raw texts in it.
+3. Sends them to the **hosted LLM** (OpenRouter/OpenAI/Anthropic) with two parallel prompts:
+
+**Prompt A — Problem Extraction:**
+> *"You are an expert product researcher. Extract the core problem this cluster of complaints all share: title, who experiences it, severity (1-10), frequency (1-10), workaround, and a Devil's Advocate view on why this is a bad startup idea."*
+
+**Prompt B — Competition Analysis:**
+> *"Analyze the competitive landscape: who are the existing solutions, why are they failing, and what is the exact market gap?"*
+
+4. If a valid problem is found, it's saved as:
+   - A `Problem` row (title, description, severity, frequency, user_segment, workaround, signal_type)
+   - `ProblemEvidence` rows linking each observation to the problem
+   - `ExistingSolution` rows for each named competitor
+
+**Budget guard:** Checks total cost before each cluster — stops if `max_cost_per_run_usd` (default: $2.00) is exceeded.
+
+---
+
+### Step 5: Research (Multi-Agent)
+
+**Command:** `analyze research`
+
+This is the most powerful step. For each verified problem, **5 specialist agents run in parallel** using `asyncio.gather`:
+
+| Agent | What it analyzes | Output |
+|---|---|---|
+| **Customer Agent** | B2C vs B2B, who holds the budget, economic value, pain frequency | `CustomerAnalysis` |
+| **Market Agent** | TAM sizing from signals, growth trajectory, adjacent spend | `MarketResearch` |
+| **Technical Agent** | Core tech required, complexity score, regulatory blockers, MVP cost estimate | `TechnicalAssessment` |
+| **Distribution Agent** | Where users hang out, acquisition channel, how hard to break in (1-10) | `DistributionAssessment` |
+| **Why Now Agent** | What technology/regulatory/behaviour shift makes this solvable TODAY | `WhyNowAssessment` |
+
+After all 5 agents complete, the **Bull/Bear Judge Agent** receives all 5 reports and produces:
+- **Bull Case** — strongest argument for why this is a billion-dollar company
+- **Bear Case** — strongest structural argument for why it will fail
+- **Verdict** — `BUILD`, `VALIDATE`, or `KILL`
+
+All results are saved to `problem_research` as JSON columns.
+
+---
+
+### Step 6: Score
+
+**Command:** `analyze score`
+
+**The scoring model** combines 7 weighted dimensions into a final `0.0–1.0` score:
+
+| Dimension | Weight | Source |
+|---|---|---|
+| Pain Severity | 20% | `problem.severity / 10` |
+| Market Size | 15% | Market Agent `score` |
+| Willingness to Pay | 15% | Pricing signals in raw text + Customer Agent |
+| Why Now | 15% | Why Now Agent `score` |
+| Competition Gap | 15% | Named competitors count |
+| Distribution | 10% | Distribution Agent `score` |
+| Technical Feasibility | 10% | Technical Agent `score` |
+
+**Evidence Confidence Multiplier:**
+```
+confidence = 0.4 + (0.1 × platforms_covered) + (0.05 × min(10, independent_sources))
+final_score = raw_score × confidence
+```
+
+This means a problem with lots of cross-platform evidence scores higher than one seen only once on a single source — the system rewards signal diversity.
+
+**Evidence Ledger** (saved per opportunity):
+- User complaints count
+- Independent sources (cross-referenced)
+- Platforms covered
+- Named competitors found
+- Pricing evidence signals (mentions of "$")
+- Recent signals (last 30 days)
+
+---
+
+### Step 7: Report
+
+**Command:** `output report`
+
+Generates `opportunity_report.md` with all opportunities ranked by final score. Each entry shows:
+- Final score and confidence percentage
+- Star ratings (★★★★☆) for each dimension with evidence snippet
+- Full evidence ledger
+- Bull Case, Bear Case, and BUILD/VALIDATE/KILL verdict
+
+---
+
+## 4. Path B — Compound Discovery
+
+**Command:** `analyze path-b`
+
+This is a second discovery mode that finds **"Old Problem + New Tech = New Opportunity"**.
+
+You seed the database with:
+- `HardProblem` rows — problems that have been painful for decades but were previously unsolvable (e.g., "Real-time language translation for video calls", "Automated medical coding")
+- `TechShift` rows — recent technological or regulatory shifts (e.g., "LLMs can now follow complex instructions", "EU AI Act came into force", "Inference cost dropped 100x")
+
+The **Compound Opportunity Agent** then asks:
+> *"Does any recent tech shift suddenly make this hard old problem solvable in a way it wasn't before?"*
+
+If `confidence_score > 0.6`, a new `Problem` + `ProblemResearch` is created with `signal_type = "path_b"` and immediately marked verified, skipping the normal collection pipeline.
+
+---
+
+## 5. The LLM Stack
+
+Idea Hunter uses a **two-tier LLM architecture** to minimize cost:
+
+### Local (Free — via Ollama)
+
+| Model | Used For |
+|---|---|
+| `nomic-embed-text` | Semantic embeddings for all observations |
+| `granite3.1-dense:2b` | Quick complaint classification (pre-LLM gate) |
+
+### Hosted (Paid — via API)
+
+| Provider | Default Model | Used For |
+|---|---|---|
+| OpenRouter | `openai/gpt-4o-mini` | Problem extraction, research agents, debate |
+| OpenAI | `gpt-4o-mini` | Alternative provider |
+| Anthropic | `claude-3-5-haiku-20241022` | Alternative provider |
+
+Switch provider by setting `LLM_PROVIDER=openai` (or `anthropic`, `openrouter`) in `.env`.
+
+### How `ModelRouter` works
+
+`ModelRouter` in [`llm/router.py`](src/idea_hunter/llm/router.py) dispatches tasks:
+- **Cheap/local tasks** → `local_client.generate_structured()` using Ollama
+- **Expensive/reasoning tasks** → `hosted_client.generate_structured()` using the hosted API
+
+All LLM calls produce **structured Pydantic output** — no regex parsing of free text.
+
+---
+
+## 6. The Database Schema
+
+```
+sources            ← One row per data source (hackernews, reddit, etc.)
+  └── observations ← Raw scraped text + embedding vector + cluster_id
+        └── problem_evidence ← Links observations → problems
+              └── problems   ← Extracted structured problems
+                    ├── existing_solutions  ← Named competitor list
+                    ├── problem_research    ← Multi-agent JSON reports
+                    └── opportunities       ← Scored opportunities
+                          └── opportunity_scores ← Dimension breakdown
+
+research_runs   ← Audit log of every pipeline execution
+cost_logs       ← Token-level cost tracking per run
+user_feedback   ← Human accept/reject verdicts on opportunities
+trends          ← Velocity signals when observations merge into clusters
+hard_problems   ← Seed data for Path B discovery
+tech_shifts     ← Seed data for Path B discovery
+```
+
+**Key design decisions:**
+- **pgvector** for the `embedding` column enables cosine similarity search directly in SQL — no separate vector DB needed.
+- **Content hash deduplication** (SHA-256) prevents the same complaint from being processed twice across multiple runs.
+- **Incremental crawl cursor** (`last_seen_cursor` on `sources`) means each new run only fetches posts newer than the last run.
+- **`signal_type`** on problems tracks where they came from: `"cluster"` (from HDBSCAN), `"singleton"` (single observation), or `"path_b"` (compound discovery).
+
+---
+
+## 7. The API & Dashboard
+
+### FastAPI Backend (`src/idea_hunter/api/main.py`)
+
+Running at `http://localhost:8000`:
+
+| Endpoint | Description |
+|---|---|
+| `GET /opportunities` | List all scored opportunities sorted by score |
+| `GET /opportunities/{id}` | Full details for one opportunity |
+| `GET /problems` | List all extracted problems |
+| `POST /feedback/{problem_id}` | Submit BUILD/KILL verdict |
+| `GET /stats` | Database stats summary |
+| `GET /docs` | Auto-generated Swagger UI |
+
+### React Dashboard (`dashboard-v2/`)
+
+Running at `http://localhost:5173`:
+- Opportunity cards ranked by score with star ratings
+- Evidence ledger display per opportunity
+- Bull/Bear debate viewer
+- One-click BUILD/KILL feedback buttons
+
+---
+
+## 8. Cost Control System
+
+Every hosted LLM call is tracked in the `cost_logs` table with:
+- `model` — which model was used
+- `provider` — openrouter / openai / anthropic
+- `input_tokens`, `output_tokens`, `cost_usd`
+- `run_id` — links back to the research run
+
+**Budget guards** in the pipeline:
+- Before each cluster extraction: checks if total cost >= `max_cost_per_run_usd` (default: $2.00)
+- Before each research run: same check
+
+**Typical costs:**
+| Stage | Cost |
+|---|---|
+| Embedding 500 observations | $0.00 (local Ollama) |
+| Extract 10 clusters | ~$0.05–$0.15 (GPT-4o-mini) |
+| Research 5 problems (5 agents + debate) | ~$0.10–$0.30 |
+| **Total per full run** | **~$0.15–$0.50** |
+
+---
+
+## 9. Configuration Reference
+
+All settings are in `.env` (read by `src/idea_hunter/config.py`):
+
+```dotenv
+# Database
+DATABASE_URL=postgresql+asyncpg://ideahunter:ideahunter@localhost:5432/ideahunter
+
+# Local Ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL_SMALL=granite3.1-dense:2b
+OLLAMA_EMBED_MODEL=nomic-embed-text
+
+# Hosted LLM
+LLM_PROVIDER=openrouter           # openrouter | openai | anthropic | ollama
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=openai/gpt-4o-mini
+
+# Cost Limits
+MAX_COST_PER_RUN_USD=2.0
+MAX_AGENT_ITERATIONS=3
+
+# Data Sources (optional)
+GITHUB_TOKEN=ghp_...
+REDDIT_CLIENT_ID=...
+REDDIT_CLIENT_SECRET=...
+```
+
+---
+
+## 10. Running the Pipeline
+
+### One-click full pipeline
 
 ```powershell
-# COLLECT
-idea-hunter collect hackernews --query "hate manually doing" --limit 100
-idea-hunter collect playstore --query "productivity" --limit 100
-idea-hunter collect github --query "feature request" --limit 50
+.\run.ps1
+```
 
-# PROCESS
-idea-hunter process embed           # Embed all un-embedded observations
-idea-hunter process cluster         # Cluster embedded observations
-idea-hunter process extract         # Run LLM extraction on all clusters
-idea-hunter process verify          # Run quality gate on all problems
+### With options
 
-# ANALYZE
-idea-hunter analyze score           # Score all verified problems
+```powershell
+# Custom queries
+.\run.ps1 -Queries "I hate", "why is there no", "annoying problem"
 
-# OUTPUT
-idea-hunter output report           # Generate opportunity_report.md
+# Skip data collection (use existing observations)
+.\run.ps1 -SkipCollect
+
+# Pipeline only, no dashboard launch
+.\run.ps1 -SkipDashboard
+```
+
+### Step-by-step manual run
+
+```powershell
+# 1. Collect from HackerNews
+python -m idea_hunter.cli.main collect hackernews --query "I hate" --limit 100
+
+# 2. Embed observations (local Ollama)
+python -m idea_hunter.cli.main process embed
+
+# 3. Cluster similar problems
+python -m idea_hunter.cli.main process cluster
+
+# 4. Extract problems from clusters (LLM)
+python -m idea_hunter.cli.main process extract --limit 10
+
+# 5. Verify problems (rule-based gates)
+python -m idea_hunter.cli.main process verify
+
+# 6. Run multi-agent research (LLM)
+python -m idea_hunter.cli.main analyze research
+
+# 7. Path B discovery (optional)
+python -m idea_hunter.cli.main analyze path-b
+
+# 8. Score all problems
+python -m idea_hunter.cli.main analyze score
+
+# 9. Generate report
+python -m idea_hunter.cli.main output report
+```
+
+### Launch services separately
+
+```powershell
+# FastAPI backend
+python -m uvicorn idea_hunter.api.main:app --reload --port 8000
+
+# React dashboard
+cd dashboard-v2
+npm run dev
 ```
 
 ---
 
-## Database Schema (PostgreSQL 17)
-
-| Table | Purpose |
-|---|---|
-| `sources` | Metadata about each data source (HN, Play Store, etc.) |
-| `observations` | Raw scraped text — the core data unit. Has `content_hash`, `embedding`, `cluster_id` |
-| `problems` | LLM-extracted structured problem descriptions |
-| `problem_evidence` | Join table linking `observations` → `problems` |
-| `existing_solutions` | Competitors and gaps identified by the Competition Agent |
-| `opportunities` | One-to-one with `problems`, holds the title and status |
-| `opportunity_scores` | Full scoring breakdown for each opportunity |
-| `user_feedback` | Stores your accept/reject verdicts from the dashboard |
-| `research_runs` | Tracks collection runs (start/end time, items collected) |
-| `cost_logs` | Tracks API token costs per run |
-| `trends` | Placeholder for future trend detection |
-
----
-
-## What's Still Pending (TODO)
-
-### 🔴 Critical / Broken
-
-- **`github.py` is untested** — The `github_token` config key doesn't exist in `settings` (the code references `settings.github_token` which doesn't exist in `config.py`). Will crash if you try to run `collect github`.
-- **`pgvector` not used** — Embeddings are stored as JSON arrays, not proper PostgreSQL `vector` columns. This means semantic similarity search is not available and queries will be slow at scale.
-- **Scoring inputs are hardcoded** — In `cli/main.py`, `growth_trend`, `willingness_to_pay`, `market_size`, `competition_gap`, `distribution_feasibility`, and `technical_feasibility` are all hardcoded to `0.5`. The LLM doesn't actually estimate these — only `severity` and `frequency` come from the extracted problem.
-
-### 🟡 Incomplete / Stub
-
-- **Reddit collector is built but not wired to CLI** — `reddit.py` exists and is fully coded, but there is no `collect reddit` CLI command. Also requires API credentials.
-- **`trends` table is empty** — The `Trend` model exists but nothing writes to it. Trend detection was planned for a later phase.
-- **`CostLog` table is never written to** — The table exists and the model is defined, but the LLM clients never actually log costs. The `max_cost_per_run_usd = $2.00` guardrail is not enforced.
-- **`ResearchRun` table is never written to** — Run tracking is defined but not implemented in any CLI command.
-- **`confidence.py` is unused** — `src/idea_hunter/analysis/confidence.py` exists but is never called in the pipeline.
-- **Dashboard has no error states** — If the API is down, the React UI silently shows an empty state with no message.
-- **No authentication on the API** — The FastAPI backend allows all origins (`*`) and has no auth. Fine for local use, but needs securing before any deployment.
-
-### 🟢 Future / Phase 3
-
-- **Reddit API credentials** — Wire up Reddit once you get API credentials from `reddit.com/prefs/apps`.
-- **Native `pgvector` columns** — Replace JSON embeddings with proper `vector(768)` columns for fast approximate nearest-neighbor search.
-- **Trend detection** — Populate the `trends` table by comparing cluster sizes over time.
-- **Cost tracking** — Implement `CostLog` writes and enforce the `$2.00/run` guardrail.
-- **`collect github` command** — Add the CLI command and fix the missing `github_token` config key.
-- **Automatic pipeline scheduling** — Currently every step must be run manually. A scheduled background job would run the full pipeline nightly.
-- **Better LLM scoring** — Replace the hardcoded `0.5` fallbacks for `willingness_to_pay`, `market_size`, etc. with actual LLM estimates from the extraction step.
+*Built with: Python, SQLAlchemy (async), PostgreSQL, pgvector, Ollama, HDBSCAN, FastAPI, React*

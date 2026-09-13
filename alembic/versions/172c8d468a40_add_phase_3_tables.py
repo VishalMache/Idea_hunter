@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '172c8d468a40'
-down_revision: Union[str, Sequence[str], None] = '8941abc2d3e4'
+down_revision: Union[str, Sequence[str], None] = '75284daa5420'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -38,7 +38,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.PrimaryKeyConstraint('id')
     )
-    op.add_column('problems', sa.Column('signal_type', sa.String(length=50), nullable=False))
+    op.add_column('problems', sa.Column('signal_type', sa.String(length=50), nullable=False, server_default='cluster'))
     # ### end Alembic commands ###
 
 

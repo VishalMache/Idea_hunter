@@ -33,6 +33,9 @@
   color: var(--text-primary);
 }
 
+.candidate-score { display: inline-flex; align-items: center; gap: 5px; color: #d9bd77; border-color: rgba(217, 189, 119, .35); }
+.opp-status { color: var(--text-muted); font-size: .72rem; margin: -2px 0 10px; }
+
 .opp-title {
   font-size: 1rem;
   margin-bottom: 8px;
