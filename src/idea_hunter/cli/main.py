@@ -248,6 +248,78 @@ def collect_reddit(
         
     run_async(_run())
 
+@collect_app.command("source")
+def collect_generic_source(
+    source: str = typer.Option(..., help="Source ID from catalog (e.g. devto, producthunt)"),
+    query: str = typer.Option(..., help="Search query"),
+    limit: int = typer.Option(50, help="Number of items to collect")
+):
+    """Collect problem observations from a catalog source."""
+    console.print(f"Collecting up to {limit} items from '{source}' for query: '{query}'...")
+    try:
+        collector = get_collector(source)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(code=1)
+    
+    async def _run():
+        count = 0
+        async with session_scope() as session:
+            stmt = select(Source).where(Source.source_type == source)
+            result = await session.execute(stmt)
+            source_row = result.scalar_one_or_none()
+            if not source_row:
+                catalog_info = get_source(source)
+                source_row = Source(name=catalog_info.name if catalog_info else source, source_type=source, base_url=catalog_info.base_url if catalog_info else "")
+                session.add(source_row)
+                await session.flush()
+                
+            run = ResearchRun(source_type=source, query=query)
+            session.add(run)
+            await session.flush()
+            
+            source_query = await get_or_create_source_query(session, source_id=source_row.id, query=query)
+            
+            async for obs in collector.collect(query=query, limit=limit, since_cursor=source_query.last_seen_cursor):
+                clean_text = TextCleaner.process(obs.raw_text)
+                if not clean_text:
+                    continue
+                    
+                pf_result = prefilter(clean_text, engagement=obs.engagement or 0)
+                
+                if pf_result.passed:
+                    console.print(f"[green]Passed ({pf_result.score}):[/green] {clean_text[:80]}...")
+                else:
+                    console.print(f"[dim]Filtered ({pf_result.reason}):[/dim] {clean_text[:80]}...")
+                
+                stmt_insert = insert(Observation).values(
+                    raw_text=clean_text,
+                    normalized_text=clean_text,
+                    content_hash=normalized_content_hash(clean_text),
+                    source_id=source_row.id,
+                    source_url=obs.source_url,
+                    published_at=obs.published_at,
+                    author=obs.author,
+                    engagement=obs.engagement,
+                    topic=obs.topic,
+                    passed_prefilter=pf_result.passed
+                ).on_conflict_do_nothing(index_elements=['content_hash'])
+                
+                await session.execute(stmt_insert)
+                
+                if obs.cursor_value:
+                    mark_source_query_success(source_query, obs.cursor_value)
+                    
+                count += 1
+                
+            run.items_collected = count
+            run.status = "completed"
+            run.completed_at = func.now()
+                
+        console.print(f"\n[bold]Saved {count} observations to database.[/bold]")
+        
+    run_async(_run())
+
 
 @process_app.command("triage")
 def triage_observations(
@@ -258,6 +330,7 @@ def triage_observations(
     console.print(f"Triaging up to {limit} observations...")
 
     async def _run():
+        ollama_failed = False
         async with session_scope() as session:
             observations = (await session.execute(
                 select(Observation).where(Observation.triage_state == "pending").limit(limit)
@@ -265,13 +338,14 @@ def triage_observations(
             for observation in observations:
                 text = observation.normalized_text or observation.raw_text
                 result = heuristic_triage(text)
-                if use_local_model:
+                if use_local_model and not ollama_failed:
                     try:
                         model_result = await model_router.triage_signal(text)
                         if model_result.signal_type in TRIAGE_TYPES:
                             result = type(result)(model_result.signal_type, model_result.confidence, model_result.rationale)
                     except Exception as error:
-                        console.print(f"[dim]Local triage fallback: {error}[/dim]")
+                        console.print(f"[dim]Local triage fallback (disabling model for this run): {error}[/dim]")
+                        ollama_failed = True
                 observation.signal_type = result.signal_type
                 observation.triage_state = "rejected" if result.signal_type == "noise" else "accepted"
                 # Existing embedding queries use passed_prefilter. Preserve the
@@ -308,6 +382,10 @@ def embed_observations(limit: int = typer.Option(500, help="Number of observatio
                 
                 # Process this chunk
                 embeddings = await embedder.embed_batch(texts)
+                
+                if embeddings and not any(embeddings):
+                    console.print("[red]Embeddings failed (Ollama connection error). Aborting.[/red]")
+                    break
                 
                 for obs, emb in zip(chunk_obs, embeddings):
                     obs.embedding_attempts = (obs.embedding_attempts or 0) + 1
