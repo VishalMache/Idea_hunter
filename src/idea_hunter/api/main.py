@@ -3,8 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from idea_hunter.db.engine import get_db_session
-from idea_hunter.db.models import Problem, Opportunity, OpportunityScore, Observation, ProblemEvidence, ExistingSolution, UserFeedback, ProblemResearch
+from idea_hunter.db.models import Problem, Opportunity, OpportunityScore, Observation, ProblemEvidence, ExistingSolution, UserFeedback, ProblemResearch, Source
+from idea_hunter.collectors.source_catalog import SOURCES
 from pydantic import BaseModel
+from idea_hunter.config import settings
+from idea_hunter.api.v1 import router as v1_router
 
 class FeedbackRequest(BaseModel):
     verdict: str
@@ -14,12 +17,27 @@ app = FastAPI(title="Idea Hunter API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip() for origin in settings.api_cors_origins.split(",") if origin.strip()],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(v1_router)
+
+
+@app.get("/api/sources")
+async def list_sources(db: AsyncSession = Depends(get_db_session)):
+    """Source-selection data for the existing dashboard; no collection is triggered here."""
+    persisted = {source.source_type: source for source in (await db.execute(select(Source))).scalars().all()}
+    return {"sources": [{
+        "key": definition.key, "name": definition.name, "group": definition.group,
+        "categories": definition.categories, "signal_kind": definition.signal_kind,
+        "reliability": definition.reliability, "acquisition": definition.acquisition,
+        "enabled": persisted.get(definition.key).enabled if definition.key in persisted else definition.enabled_by_default,
+        "health_status": persisted.get(definition.key).health_status if definition.key in persisted else "not_configured",
+        "notes": definition.notes,
+    } for definition in SOURCES]}
 @app.get("/api/stats")
 async def get_stats(db: AsyncSession = Depends(get_db_session)):
     obs_count = await db.scalar(select(func.count(Observation.id)))
@@ -114,16 +132,17 @@ async def list_all_problems(limit: int = 500, db: AsyncSession = Depends(get_db_
 
 @app.get("/api/observations")
 async def list_observations(limit: int = 100, db: AsyncSession = Depends(get_db_session)):
-    stmt = select(Observation).order_by(Observation.collected_at.desc()).limit(limit)
+    stmt = select(Observation, Source.source_type).join(Source, Observation.source_id == Source.id).order_by(Observation.collected_at.desc()).limit(limit)
     res = await db.execute(stmt)
-    observations = res.scalars().all()
+    observations = res.all()
     
     data = []
-    for obs in observations:
+    for obs, source_type in observations:
         data.append({
             "id": obs.id,
             "text": obs.raw_text,
             "source": obs.source_url or "unknown",
+            "source_type": source_type,
             "engagement": obs.engagement,
             "cluster_id": obs.cluster_id,
             "published_at": obs.published_at

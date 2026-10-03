@@ -1,0 +1,1042 @@
+IDEA HUNTER
+FULL CODEBASE REVIEW AND REDESIGN BLUEPRINT
+======================================================================
+
+Review date: 2026-10-03
+Repository: D:\VMsProject\Creations\idea_hunter
+Review scope: source code, database models and migrations, CLI, API,
+collectors, processing pipeline, LLM layer, report output, dashboards,
+tests, configuration, run scripts, and existing planning documents.
+
+
+1. EXECUTIVE SUMMARY
+======================================================================
+
+Idea Hunter is a local opportunity-intelligence engine. Its purpose is to
+collect public/user-provided signals, identify repeated customer problems,
+research those problems with LLM agents, score opportunities, and present
+the results in a dashboard.
+
+The current project is a useful prototype, but it is not yet a clean,
+production-ready application. The core research idea is sound; the main
+issue is that several generations of the project coexist in the repository:
+
+  - The Python pipeline is the real product core.
+  - dashboard-v2 is the real frontend.
+  - dashboard is an unused, untouched Vite starter screen.
+  - Planning documents describe earlier and later designs that do not always
+    match the current implementation.
+  - Several source and test changes are currently uncommitted.
+  - PostgreSQL + pgvector is the intended runtime, while a SQLite database
+    file is also present and several utilities still assume SQLite.
+
+Recommended redesign direction:
+
+  - Keep Python for ingestion, processing, LLM orchestration, scoring, and
+    scheduled jobs.
+  - Keep PostgreSQL + pgvector as the single source of truth.
+  - Split the current CLI pipeline into explicit application services and
+    background jobs with persisted run/stage state.
+  - Keep FastAPI as a typed API, but add authentication, validation, proper
+    error responses, pagination, filters, and run controls.
+  - Replace dashboard-v2 with a TypeScript React application using a query
+    cache and a component system. Do not carry forward the legacy dashboard.
+  - Make evidence provenance and confidence first-class UI concepts.
+  - Treat LLM output as research hypotheses that must remain traceable to
+    observations; never present model-generated market claims as verified
+    facts without source evidence.
+
+Current maturity estimate:
+
+  Research engine:        Prototype / advanced proof of concept
+  Data ingestion:         Prototype with several usable adapters
+  Database design:        Reasonable foundation, needs normalization and
+                          stronger constraints
+  LLM orchestration:      Functional concept, provider handling incomplete
+  API:                    Demo-ready, not production-ready
+  Frontend:               Visual prototype, not a finished product surface
+  Tests:                  Small unit/integration start, incomplete execution
+  Operations/deployment:  Local developer workflow only
+
+
+2. WHAT THE PROJECT CURRENTLY DOES
+======================================================================
+
+The implemented product flow is approximately:
+
+  public/API/manual source
+          |
+          v
+  RawObservation normalization
+          |
+          v
+  clean text + keyword prefilter + SHA-256 hash
+          |
+          v
+  observations table
+          |
+          v
+  local Ollama embeddings
+          |
+          v
+  cosine merge against existing clusters + HDBSCAN for new items
+          |
+          v
+  cluster-level hosted/local structured LLM extraction
+          |
+          v
+  problems + problem_evidence + existing_solutions
+          |
+          v
+  deterministic verification
+          |
+          v
+  five parallel research agents + bull/bear debate
+          |
+          v
+  deterministic opportunity scoring
+          |
+          v
+  markdown report + FastAPI API + React dashboard
+
+The project supports two discovery paths:
+
+  Path A: repeated user pain signals -> problem -> research -> score.
+  Path B: old hard problem + recent technology/regulatory shift -> compound
+           opportunity, using hard_problems and tech_shifts.
+
+
+3. REPOSITORY MAP
+======================================================================
+
+Root/runtime files
+------------------
+
+  pyproject.toml
+    Python package metadata, runtime dependencies, and the idea-hunter CLI
+    entry point. Python >= 3.11.
+
+  run.ps1
+    One-click local pipeline. Applies migrations, optionally collects HN,
+    DEV.to, Reddit, and Product Hunt data, runs processing/research/scoring,
+    creates the report, and launches FastAPI plus dashboard-v2.
+
+  .env / .env.template
+    Runtime configuration and provider credentials. .env is ignored by git.
+
+  ideahunter.db
+    A checked-out SQLite database file. It conflicts conceptually with the
+    configured PostgreSQL + pgvector runtime and should not be part of the
+    redesign source tree.
+
+  opportunity_report.md
+    Generated report output. It is ignored by git but currently present.
+
+  HOW_IT_WORKS.md
+    Large operational explanation of the current pipeline.
+
+  implementation_plan*, opportunity-intelligence-engine-plan.md
+    Historical and revised planning documents. They are valuable context but
+    are not a reliable specification of the exact current code.
+
+Python package: src/idea_hunter
+--------------------------------
+
+  config.py
+    Pydantic settings loaded from .env.
+
+  db/engine.py, db/session.py, db/models.py
+    Async SQLAlchemy engine/session and database entities.
+
+  collectors/
+    Base contract and source-specific adapters.
+
+  processing/
+    Cleaning, prefiltering, deduplication, embeddings, extraction,
+    verification, and research orchestration.
+
+  analysis/
+    HDBSCAN clustering and deterministic evidence-backed scoring.
+
+  llm/
+    Ollama client, OpenRouter client, provider routing, prompts, and Pydantic
+    response schemas.
+
+  api/main.py
+    FastAPI read API and feedback endpoint.
+
+  cli/main.py
+    Typer commands for collection and all pipeline stages. This file is very
+    large and currently contains both orchestration and persistence logic.
+
+  output/report_generator.py
+    Markdown report generation.
+
+Database migrations: alembic
+----------------------------
+
+  The migration chain starts with PostgreSQL/pgvector, then adds content
+  hashes, clusters, costs, feedback, research, verification, Path B tables,
+  and source metadata. There are two branches after revision
+  172c8d468a40 (verification and source metadata); the source metadata
+  revision currently continues from 172c8d468a40 while the verification
+  revision also continues from it. The database may therefore have multiple
+  heads and run.ps1 uses upgrade heads.
+
+Frontends
+---------
+
+  dashboard-v2/
+    React 19 + Vite + lucide-react. This is the active dashboard.
+
+  dashboard/
+    Vanilla JavaScript Vite starter template with the default Vite hero,
+    counter, documentation, and community links. It is not connected to the
+    backend and should be deleted or archived during redesign.
+
+Tests
+-----
+
+  Tests cover source normalization, prefilter/cleaner/deduplicator contract,
+  source catalog assumptions, and a live Hacker News collector request.
+  There is no comprehensive database, API, pipeline, LLM-mocking, frontend,
+  or scoring regression suite.
+
+
+4. CURRENT TECHNOLOGY STACK
+======================================================================
+
+Backend
+  Python 3.11+
+  FastAPI 0.115+
+  Uvicorn
+  SQLAlchemy 2 async
+  asyncpg
+  PostgreSQL + pgvector
+  Alembic
+  Pydantic v2 + pydantic-settings
+  Typer + Rich
+
+AI/data processing
+  Ollama for local classification and embeddings
+  nomic-embed-text expected at 768 dimensions
+  granite model configured for local tasks
+  OpenRouter through the OpenAI-compatible client for hosted reasoning
+  HDBSCAN, NumPy, and cosine similarity
+  BeautifulSoup for HTML cleanup
+
+Collection
+  Hacker News Algolia public API
+  AsyncPRAW for Reddit
+  GitHub REST issues adapter
+  google-play-scraper for Play Store reviews
+  DEV.to public API
+  Product Hunt GraphQL API
+  Manual JSON/CSV import for catalog entries without an approved adapter
+
+Frontend
+  React 19, Vite, lucide-react, plain CSS
+  No TypeScript
+  No router
+  No query/state library
+  No generated API client
+  No frontend test tooling
+
+
+5. DATABASE AND DOMAIN MODEL
+======================================================================
+
+The current domain entities are:
+
+  sources
+    Registry of source types and runtime health. Contains source name,
+    reliability, cursor, categories, signal kind, acquisition mode, enabled
+    flag, and health note.
+
+  observations
+    Raw normalized signal. Contains raw text, SHA-256 content_hash,
+    source_id, URL, date, author, engagement, topic, country, cluster_id,
+    pgvector embedding, prefilter flag, and JSON metadata.
+
+  problems
+    Structured problem extracted from one cluster or Path B. Contains title,
+    description, user segment, industry, severity, frequency, workaround,
+    Devil's Advocate notes, verification state, status, signal type, and
+    timestamps.
+
+  problem_evidence
+    Join between problems and observations, with evidence strength and an
+    optional evidence excerpt.
+
+  existing_solutions
+    Competitors or current workarounds named by the competition analysis.
+
+  problem_research
+    One JSON report per problem with customer, market, technical,
+    distribution, and why-now analysis plus bull/bear/verdict text.
+
+  opportunities
+    Product/opportunity representation derived from a problem.
+
+  opportunity_scores
+    Numeric dimensions, final score, evidence confidence, source diversity,
+    and the complete score breakdown JSON.
+
+  research_runs
+    Audit record for collection/extraction/research runs, status, counts,
+    notes, and total cost.
+
+  cost_logs
+    Provider/model/token/cost records linked to a run.
+
+  user_feedback
+    Accept/reject feedback on a problem.
+
+  trends
+    Basic cluster-growth events created during vector merges.
+
+  hard_problems and tech_shifts
+    Path B seed entities.
+
+Current data-model strengths
+----------------------------
+
+  - Raw observations are retained instead of only storing summaries.
+  - A content hash provides a simple cross-run deduplication key.
+  - Evidence is linked through a join table instead of being copied into the
+    problem row.
+  - Research and score breakdowns are preserved as JSON for iteration.
+  - Cost and feedback tables anticipate operational learning.
+
+Current data-model weaknesses
+-----------------------------
+
+  - Several important relationships have no explicit uniqueness constraints.
+    At minimum, enforce one opportunity per problem and one score per
+    opportunity unless historical versions are intentionally supported.
+  - Foreign-key delete behavior is not specified. Deleting a problem could
+    leave dependent rows or make cleanup difficult.
+  - JSON research fields are flexible but not versioned. A prompt/schema
+    change can make old records difficult to interpret.
+  - Source cursor is stored once per source, although collection is often
+    query/subreddit/category-specific. Cursor should be scoped by source plus
+    collection configuration.
+  - Observation content_hash is based on RawObservation.raw_text, while the
+    stored text is cleaned. This can allow semantically identical cleaned
+    content to survive if raw formatting differs.
+  - Embedding model name and dimension are not stored per observation. A
+    model change can make vectors incomparable.
+  - Evidence strength is not consistently populated or recalculated.
+  - User feedback is not associated with a user/workspace because the app has
+    no authentication or tenant model.
+  - No first-class pipeline stage/job table exists; research_runs is being
+    used as a broad audit record instead of a resumable job state machine.
+
+Recommended redesign schema additions
+--------------------------------------
+
+  workspaces, users, workspace_members
+  source_connections and source_queries
+  ingestion_runs and ingestion_items
+  processing_runs or a generic pipeline_runs + pipeline_steps
+  observation_versions / normalized_observations if raw and cleaned text must
+    be separately preserved
+  clusters with stable IDs, label, centroid metadata, and lifecycle state
+  problem_versions and research_versions
+  evidence_claims with claim text, evidence IDs, support/contradiction, and
+    confidence
+  opportunity_feedback with actor, decision, note, and timestamp
+  model_registry with provider/model/version/dimension/pricing
+
+
+6. PIPELINE BEHAVIOR IN DETAIL
+======================================================================
+
+Stage A: collect
+----------------
+
+The CLI creates or finds a Source and ResearchRun, invokes a collector,
+cleans each RawObservation, applies a keyword prefilter, then inserts into
+observations with PostgreSQL ON CONFLICT DO NOTHING on content_hash.
+
+Collectors currently available:
+
+  Hacker News      public Algolia API, comments, incremental object cursor
+  Reddit           AsyncPRAW, credentials required
+  Play Store       synchronous google-play-scraper inside async method
+  GitHub           REST issues adapter, not wired into a dedicated CLI path
+  DEV.to           public API, tag/latest behavior
+  Product Hunt     GraphQL, token required
+  Manual import    user-provided CSV/JSON for approved catalog sources
+
+The source catalog contains 50 definitions, but only DEV.to and Product Hunt
+have automated collectors in the new catalog. Many others are intentionally
+manual_import or disabled, which is the correct legal/operational direction.
+
+Stage B: clean and prefilter
+----------------------------
+
+TextCleaner removes HTML, URLs, and excess whitespace. prefilter rejects text
+that is too short, looks like noise, or has no configured pain phrase. It
+currently does not require engagement because min_engagement defaults to 0.
+This means the engagement parameter is available but does not filter by
+default.
+
+The prefilter is deterministic and cheap, which is a good design. It is also
+keyword-biased: valid pain expressed without one of the configured phrases is
+discarded before embeddings and LLM analysis.
+
+Stage C: embed
+--------------
+
+Passed observations without embeddings are loaded in batches of 10 and sent
+to Ollama nomic-embed-text. The client truncates text to 8,000 characters.
+Embedding failures are replaced with a 768-dimensional zero vector so the
+batch remains aligned. This avoids a crash but creates invalid semantic data;
+failed embeddings should be marked failed and retried instead.
+
+Stage D: cluster
+----------------
+
+New embedded observations first compare in Python against all observations
+already assigned to clusters. A cosine distance under 0.2 merges into the
+nearest cluster. Remaining observations go through HDBSCAN. Noise points are
+converted into singleton clusters. A Trend row is created for every vector
+merge.
+
+This is a reasonable prototype algorithm, but it has scaling limitations:
+all existing embeddings are loaded and compared in Python, and stable cluster
+identity/lifecycle is represented only by an integer on observations.
+
+Stage E: extract
+----------------
+
+Unprocessed cluster IDs are selected by checking whether observations have
+ProblemEvidence. Every cluster is sent to the extractor. The extractor first
+creates an ExtractedProblem, rejects confidence below 0.3, and then makes a
+second competition-analysis call. The CLI creates Problem, evidence links,
+and ExistingSolution rows.
+
+Extraction is structured through Pydantic schemas. This is one of the best
+parts of the current design. However, evidence IDs are not a strong claim
+linking system yet; the model can still produce an answer that is only loosely
+connected to individual observations.
+
+Stage F: verification
+----------------------
+
+Verification is deterministic. It checks severity*frequency, evidence count,
+source count, and engagement. A problem generally needs at least two evidence
+items and either engagement or multiple sources.
+
+This is useful as a guard, but it is not yet a true evidence verifier. It does
+not detect contradictory evidence, duplicate authors, copied content, source
+quality by kind, stale evidence, or unsupported claims inside the LLM output.
+
+Stage G: research
+-----------------
+
+For each priority problem, five hosted/local model calls run in parallel:
+
+  customer, market, technical feasibility, distribution, why-now
+
+Then a sixth bull/bear debate call synthesizes BUILD, VALIDATE, or KILL. The
+reports are stored as JSON in ProblemResearch. The evidence context is capped
+at eight observations with 1,500 characters each.
+
+The parallel shape is good for latency, but all five calls can fail together
+and there is no per-agent retry, partial completion, or persisted step state.
+
+Stage H: score
+--------------
+
+EvidenceScorer combines seven dimensions:
+
+  pain             20%
+  market           15%
+  willingness pay  15%
+  why now          15%
+  competition      15%
+  distribution     10%
+  technical        10%
+
+The raw potential score is multiplied by an evidence confidence score. The
+score breakdown and ledger are saved, which makes the result inspectable.
+
+Important scoring issue: the scorer tries to determine source type from
+private _source_type or observation metadata, but persisted observations are
+normally queried without a source type attached and metadata does not always
+contain it. It also does not fall back to the Observation.source relationship.
+This can classify all observations as mixed with default reliability and can
+make source diversity/category calculations wrong.
+
+Stage I: report
+---------------
+
+MarkdownReportGenerator creates opportunity_report.md from scored data. This
+is a useful low-complexity output and should remain available even after the
+dashboard redesign.
+
+
+7. BACKEND/API REVIEW
+======================================================================
+
+Current endpoints are under /api:
+
+  GET  /api/sources
+  GET  /api/stats
+  GET  /api/pipeline
+  GET  /api/problems/recent
+  GET  /api/problems
+  GET  /api/observations
+  GET  /api/opportunities
+  GET  /api/problems/{problem_id}
+  POST /api/feedback/{problem_id}
+
+Current API strengths
+---------------------
+
+  - Endpoints are simple and aligned with the current dashboard.
+  - Pipeline progress is computed from database state.
+  - Problem detail includes evidence, solutions, research, and score.
+  - Feedback writes are persisted and update opportunity status.
+
+Current API problems
+--------------------
+
+  - No authentication or workspace isolation.
+  - CORS allows every origin while also allowing credentials. This is unsafe
+    as a production default.
+  - Feedback verdict is free text; only accept/reject should be allowed.
+  - Missing problem returns HTTP 200 with an error object instead of 404.
+  - No response models; frontend contracts are implicit dictionaries.
+  - List endpoints lack pagination, filters, search, and stable ordering
+    controls.
+  - No endpoint starts or monitors a real pipeline run. The dashboard's
+    "Run analysis" button merely reloads the data.
+  - No endpoint exposes run history, errors, source connection testing,
+    cost history, or model health.
+  - Database exceptions are not translated into stable API errors.
+  - Data is returned without a consistent envelope/meta/pagination contract.
+  - The API creates a broad read surface for raw observations without access
+    controls or redaction.
+
+Recommended API shape
+---------------------
+
+  /api/v1/workspaces/{workspace_id}/sources
+  /api/v1/workspaces/{workspace_id}/observations
+  /api/v1/workspaces/{workspace_id}/clusters
+  /api/v1/workspaces/{workspace_id}/problems
+  /api/v1/workspaces/{workspace_id}/opportunities
+  /api/v1/workspaces/{workspace_id}/runs
+  /api/v1/workspaces/{workspace_id}/feedback
+  /api/v1/workspaces/{workspace_id}/settings
+  /api/v1/health/live
+  /api/v1/health/ready
+
+Use typed request/response schemas, cursor pagination, query parameters for
+status/source/score/date, and HTTP 202 for asynchronous run creation.
+
+
+8. FRONTEND REVIEW
+======================================================================
+
+dashboard-v2 current interface
+------------------------------
+
+The active UI is a dark, green-accented React dashboard with:
+
+  - Overview metrics for signals, problems, and opportunities
+  - Pipeline progress view
+  - Candidate list
+  - Opportunity radar cards
+  - Raw observation list
+  - Search over currently loaded opportunities
+  - Source filter for observations
+  - Problem detail modal
+  - Accept/reject feedback actions
+  - Four-second polling of stats/opportunities/pipeline/problems
+
+The visual direction is coherent enough for a prototype. The modal exposes
+the problem dossier, verification, competitors, research, and raw evidence.
+
+Frontend problems
+-----------------
+
+  - App.jsx is a single very dense file containing data fetching, layout,
+    navigation, view components, and state.
+  - It is JavaScript rather than TypeScript, so API drift is easy.
+  - API URL is hardcoded to localhost:8000/api.
+  - Polling every four seconds is wasteful and can cause overlapping requests.
+  - Fetch calls do not check HTTP status or provide user-visible errors.
+  - Loading/empty/error states are incomplete.
+  - The "Filter" button has no implementation.
+  - Settings, notifications, and global search affordances are visual only.
+  - "Run analysis" does not start analysis.
+  - Candidate and opportunity views use the same modal but do not clearly
+    distinguish a problem candidate from a scored opportunity.
+  - The score wording "Match" can imply certainty even though score is a
+    heuristic potential/confidence product.
+  - Raw evidence is displayed without a stronger provenance hierarchy,
+    contradiction handling, or claim-to-source mapping.
+  - No routing means browser refresh/deep links are unavailable.
+  - No accessibility audit is evident; keyboard modal behavior and focus
+    management need work.
+  - No frontend tests or visual regression checks are present.
+
+dashboard legacy
+----------------
+
+dashboard/src/main.js is the default Vite JavaScript starter screen. It has
+no product functionality and no backend integration. It should be removed,
+renamed as an archive, or explicitly excluded from the redesign.
+
+Recommended product information architecture
+----------------------------------------------
+
+  1. Workspace overview
+     What changed since the last run, top validated candidates, blocked jobs,
+     cost, and freshness.
+
+  2. Signal inbox
+     Raw observations with source, date, engagement, language, filtering, and
+     dedup/provenance status.
+
+  3. Problem discovery
+     Clusters and extracted problems. Show representative evidence first.
+
+  4. Opportunity dossier
+     Separate sections for evidence, pain, audience, alternatives, timing,
+     feasibility, distribution, score, confidence, and recommended next
+     validation action.
+
+  5. Runs and pipeline
+     Run history, stage state, progress, logs, retries, token/cost usage,
+     and partial failures.
+
+  6. Sources
+     Source catalog, connection/configuration state, last successful run,
+     health, rate-limit state, and legal acquisition mode.
+
+  7. Feedback/decisions
+     Accept, reject, investigate, interview, prototype, and decision notes.
+
+
+9. LLM LAYER REVIEW
+======================================================================
+
+Current provider design
+-----------------------
+
+OllamaClient handles local structured generation and embeddings. OpenRouter
+uses AsyncOpenAI with JSON object output and Pydantic validation. The router
+uses local Ollama for classification and hosted_client for extraction and
+research.
+
+Good decisions
+--------------
+
+  - Pydantic schemas are used for structured output.
+  - The application attempts to keep classification local and reasoning
+    hosted.
+  - Token usage and estimated OpenRouter cost are logged.
+  - Prompt text explicitly asks the model not to invent unsupported claims.
+  - Research agents are separated by question and can run in parallel.
+
+Risks and defects
+-----------------
+
+  - Settings advertise openrouter, ollama, openai, and anthropic providers,
+    but client.py only implements Ollama and OpenRouter. Selecting openai or
+    anthropic silently falls back to the local client.
+  - OpenRouter cost calculation is hard-coded to one model's pricing.
+  - Hosted provider selection is decided at module import time, making runtime
+    configuration changes and test mocking less straightforward.
+  - Failed embeddings become zero vectors rather than explicit failures.
+  - No retry/backoff, timeout strategy, rate-limit handling, or circuit breaker
+    for hosted generation.
+  - No prompt version, schema version, or model version is stored with a
+    research result.
+  - JSON parsing accepts a special properties wrapper but does not provide a
+    general repair/retry strategy.
+  - LLM calls inside research are not independently persisted, so a partial
+    failure loses which agent succeeded.
+  - No strong claim/evidence citation contract exists.
+
+Redesign recommendation
+-----------------------
+
+Create a provider-neutral LLM gateway with:
+
+  generate_structured(task_name, schema, messages, run_id, budget)
+
+Store for every call:
+
+  provider, model, prompt_version, schema_version, latency, status,
+  input/output tokens, estimated cost, retry count, error, and parsed output.
+
+Use explicit provider adapters for OpenAI, Anthropic, OpenRouter, and Ollama.
+Make provider/model selection dependency-injected rather than global at import
+time. Keep local embeddings as a separate EmbeddingService.
+
+
+10. CONCRETE ISSUES FOUND DURING REVIEW
+======================================================================
+
+Priority P0: must fix before treating this as reliable
+--------------------------------------------------------
+
+  1. Source provenance/scoring lookup is incomplete.
+     EvidenceScorer does not reliably obtain source_type from persisted
+     observations. Source kind, reliability, and category diversity can be
+     wrong. Fix by joining Source in scoring queries or attaching a typed
+     provenance object.
+
+  2. Provider configuration is misleading.
+     openai and anthropic settings exist but are not implemented. Fail fast
+     with a clear unsupported-provider error or implement real adapters.
+
+  3. Pipeline job state is not resumable.
+     A failed long run can leave partial database state without a reliable
+     stage-level status or retry model.
+
+  4. Production safety is absent.
+     Wildcard CORS, no authentication, no tenant isolation, and raw evidence
+     exposure are not acceptable outside local development.
+
+Priority P1: fix before significant dataset growth
+----------------------------------------------------
+
+  5. The cost guard checks aggregate CostLog cost rather than a clearly scoped
+     current run budget. A previous run can block future runs. Enforce budget
+     by run_id and update ResearchRun.total_cost_usd.
+
+  6. There is no unique constraint on one Opportunity/OpportunityScore per
+     problem/opportunity. Re-running scoring can create duplicate results.
+
+  7. Zero-vector embedding fallback pollutes clustering. Store an embedding
+     failure state and retry instead.
+
+  8. Cursor scope is too broad. A cursor must be tied to the source query or
+     collection configuration, not only the source type.
+
+  9. The prefilter can discard valid pain phrased without its keyword list.
+     Keep a recall-oriented first gate and measure pass/reject outcomes.
+
+  10. HDBSCAN and Python nearest-neighbor merging will not scale well to a
+      large observation set. Add vector indexes/ANN or batch clustering when
+      the dataset grows.
+
+Priority P2: quality and maintainability
+-----------------------------------------
+
+  11. Move CLI persistence/orchestration into services.
+  12. Add API response models and consistent errors.
+  13. Split frontend into routes, feature modules, hooks, API client, and
+      typed domain models.
+  14. Add source health, run history, cost, and error views.
+  15. Remove or archive the legacy dashboard.
+  16. Add real tests and install dev dependencies in CI.
+  17. Replace broad except blocks and print statements with structured logging.
+  18. Make all timestamps UTC-aware and make source adapters consistent about
+      timezone conversion.
+
+Potential code-level blocker to verify immediately
+---------------------------------------------------
+
+The current Hacker News collector annotation uses Optional but the displayed
+source does not import Optional. The package-wide compile check passed, but
+module import behavior should be tested directly in the same environment
+used by the CLI. Add the missing import if the runtime import fails.
+
+
+11. RECOMMENDED REDESIGN STACK
+======================================================================
+
+Backend/core
+------------
+
+  Python 3.12 or 3.11
+  FastAPI
+  SQLAlchemy 2 async
+  Alembic
+  PostgreSQL 16+ with pgvector
+  Pydantic v2
+  httpx with explicit retry/rate-limit wrappers
+  structlog or standard logging with JSON output
+
+Jobs/orchestration
+------------------
+
+For the first redesign:
+
+  - Use a database-backed job table and a worker process.
+  - Use a simple worker loop or Dramatiq/RQ-style queue if a queue is needed.
+  - Keep pipeline stages as ordinary Python services with idempotency keys.
+
+Do not add LangGraph, a graph database, or multiple vector databases until a
+measured bottleneck requires them. The current domain fits PostgreSQL well.
+
+Frontend
+--------
+
+  React + Vite + TypeScript
+  React Router
+  TanStack Query for server state, retries, cache, and polling
+  Zod or generated OpenAPI types for response validation
+  A restrained component system such as Radix-based primitives or a small
+  internal design system
+  Recharts/ECharts only where trend charts materially help decisions
+
+Deployment
+----------
+
+  Docker Compose for local PostgreSQL, pgvector, API, worker, and frontend
+  Separate API and worker containers
+  One .env.example with provider-specific sections
+  Health checks and migration step before app startup
+  CI for lint, typecheck, unit tests, migration check, and frontend build
+
+Possible alternative
+--------------------
+
+If the goal becomes a hosted multi-user SaaS rather than a local research
+tool, use a managed PostgreSQL provider, object storage for raw exports, and
+a managed job queue. The domain model should still remain PostgreSQL-first.
+
+
+12. PROPOSED TARGET ARCHITECTURE
+======================================================================
+
+  apps/
+    web/                     React + TypeScript dashboard
+    api/                     FastAPI HTTP application
+    worker/                  collection and processing worker
+
+  packages/
+    contracts/               generated OpenAPI/TypeScript contracts
+    ui/                      shared UI primitives and tokens
+
+  src/idea_hunter/
+    domain/
+      models.py              domain dataclasses/value objects
+      policies.py            verification/scoring rules
+    application/
+      commands/              start run, collect source, score problem
+      queries/               list opportunities, dossier, pipeline status
+      services/              ingestion, clustering, research, feedback
+    infrastructure/
+      db/                    SQLAlchemy mappings/repositories
+      sources/               API/manual adapters
+      llm/                   provider adapters/gateway
+      embeddings/            embedding provider
+      jobs/                  worker and retry policies
+    interfaces/
+      api/                   FastAPI routers/schemas/dependencies
+      cli/                   thin command wrappers
+    reports/                 markdown/JSON exporters
+
+  migrations/
+  tests/
+    unit/
+    integration/
+    contract/
+    fixtures/
+
+Important boundary:
+
+  API and CLI should call the same application services. Neither should own
+  the complete pipeline implementation. This prevents the current CLI from
+  becoming the only executable definition of product behavior.
+
+
+13. TARGET USER EXPERIENCE
+======================================================================
+
+The redesigned product should make one question easy to answer:
+
+  "Why should I spend time validating this opportunity, and what should I do
+   next?"
+
+Every opportunity dossier should show:
+
+  - Clear problem statement
+  - Who has the problem
+  - Number of independent evidence items
+  - Sources and source reliability
+  - Recency/freshness
+  - Representative quotes with links
+  - Contradicting or weak evidence
+  - Current workarounds and competitors
+  - Market/timing/technical/distribution hypotheses
+  - Potential score separately from evidence confidence
+  - Model/provider/prompt timestamp for generated sections
+  - Explicit recommended next step:
+      collect more evidence, interview users, test pricing, prototype, or
+      reject
+
+Suggested score language:
+
+  Potential:       how attractive the idea appears if assumptions are true
+  Confidence:      how strongly the evidence supports the current assessment
+  Freshness:       how current the evidence is
+  Recommendation:  the next validation action, not an absolute verdict
+
+This is safer and more useful than presenting a single percentage as a
+prediction.
+
+
+14. REDESIGN PHASE PLAN
+======================================================================
+
+Phase 0: stabilize and baseline
+-------------------------------
+
+  - Commit or intentionally discard current worktree changes.
+  - Decide whether the project is local-only or multi-user.
+  - Remove/archive dashboard/.
+  - Establish one canonical database target: PostgreSQL + pgvector.
+  - Fix migration heads and document migration policy.
+  - Add a reproducible Docker Compose local environment.
+  - Install test/lint dependencies and get CI green.
+
+Phase 1: extract the domain core
+--------------------------------
+
+  - Move CLI logic into application services.
+  - Add typed source, observation, cluster, problem, research, score, and run
+    contracts.
+  - Make all operations idempotent.
+  - Fix source provenance joins and score rerun duplicates.
+  - Add run/step state with retry/error information.
+
+Phase 2: reliable ingestion and evidence
+-----------------------------------------
+
+  - Standardize collector retry, rate limits, cursor scope, and timestamps.
+  - Store raw payload metadata separately from normalized text.
+  - Add failed-item/retry state.
+  - Add embedding model/version metadata.
+  - Add evidence claim links and contradiction markers.
+
+Phase 3: LLM gateway and research quality
+------------------------------------------
+
+  - Implement provider adapters or restrict configuration to OpenRouter +
+    Ollama until others are real.
+  - Persist every model call and prompt/schema version.
+  - Enforce per-run and per-workspace budgets.
+  - Add retry/backoff and partial-agent completion.
+  - Add deterministic validation of claims and scores.
+
+Phase 4: API productization
+---------------------------
+
+  - Add API versioning, auth, workspace scoping, response models, pagination,
+    filters, and proper HTTP errors.
+  - Add run creation/cancel/retry endpoints.
+  - Add health/readiness endpoints.
+
+Phase 5: frontend rebuild
+-------------------------
+
+  - Rebuild dashboard-v2 in TypeScript.
+  - Add real routes and deep links.
+  - Use TanStack Query instead of manual four-second polling.
+  - Build evidence-first dossier screens.
+  - Add run console, source management, cost, and feedback workflows.
+  - Add responsive/accessibility tests.
+
+Phase 6: validation loop
+------------------------
+
+  - Track which recommendations were accepted, rejected, interviewed,
+    prototyped, or validated externally.
+  - Measure source quality over time.
+  - Tune scoring with observed outcomes, not only model opinion.
+  - Add freshness decay and recurring collection only after reliability is
+    established.
+
+
+15. TEST STRATEGY FOR THE REDESIGN
+======================================================================
+
+Unit tests
+----------
+
+  - RawObservation hash and metadata normalization
+  - Cleaner behavior for HTML/URLs/whitespace
+  - Prefilter recall/precision fixture set
+  - Cursor progression
+  - Source provenance resolution
+  - Score formula and confidence boundaries
+  - Verification policy
+  - LLM schema parsing and provider error handling
+
+Integration tests
+-----------------
+
+  - PostgreSQL/pgvector migration from empty database
+  - Ingestion idempotency
+  - Re-running extraction does not duplicate problems/evidence
+  - Re-running scoring updates/version-controls scores
+  - Partial research retry only reruns failed agents
+  - API pagination/filter/detail/feedback contract
+
+Contract tests
+--------------
+
+  - Generate TypeScript client types from OpenAPI or validate responses with
+    Zod.
+  - Ensure frontend assumptions match API response models.
+
+End-to-end tests
+----------------
+
+  - Seed fixture observations.
+  - Run the pipeline with fake collectors and fake LLM provider.
+  - Open opportunity list, inspect dossier, submit feedback, see decision.
+
+The current live Hacker News test should be replaced or supplemented with a
+mocked fixture test. Network tests are useful as opt-in smoke tests, not as
+the main deterministic test suite.
+
+
+16. ACCEPTANCE CRITERIA FOR THE NEW VERSION
+======================================================================
+
+The redesign is ready for serious use when:
+
+  - A fresh developer can start the whole stack with one documented command.
+  - Database migrations work against a clean PostgreSQL + pgvector instance.
+  - A collection run can be started, monitored, cancelled, retried, and
+    resumed without duplicate observations or duplicate scores.
+  - Every score dimension can be traced to stored evidence or explicitly
+    labeled as a hypothesis.
+  - A provider outage does not destroy the run; failed steps are visible and
+    retryable.
+  - Budget limits are scoped correctly and visible in the UI.
+  - The API is authenticated and workspace-scoped if deployed remotely.
+  - The frontend does not use hardcoded local URLs or fake controls.
+  - The application distinguishes potential from confidence and freshness.
+  - Tests pass without live external APIs by using fixtures/mocks.
+  - Markdown/JSON export remains available for portability.
+
+
+17. IMMEDIATE NEXT ACTIONS
+======================================================================
+
+  1. Treat this file as the baseline architecture brief.
+  2. Decide local-only versus hosted multi-user product.
+  3. Preserve the research/scoring idea but freeze new source additions until
+     ingestion provenance and run state are reliable.
+  4. Fix source lookup in EvidenceScorer, provider fallback behavior, budget
+     scoping, and duplicate scoring.
+  5. Create a clean backend service boundary before adding frontend features.
+  6. Rebuild only dashboard-v2; remove the legacy dashboard starter.
+  7. Add a seeded fake pipeline test and a clean local Docker environment.
+
+
+END OF REVIEW
+======================================================================

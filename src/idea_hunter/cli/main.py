@@ -1,5 +1,6 @@
 import typer
 import asyncio
+import sys
 from rich.console import Console
 from rich.progress import track
 from sqlalchemy import select, func
@@ -7,8 +8,13 @@ from idea_hunter.collectors.hackernews import HackerNewsCollector
 from idea_hunter.collectors.reddit import RedditCollector
 from idea_hunter.collectors.github import GitHubCollector
 from idea_hunter.collectors.reviews import PlayStoreReviewsCollector
+from idea_hunter.collectors.discovery import get_collector
+from idea_hunter.collectors.source_catalog import SOURCES, get_source
+from idea_hunter.collectors.manual_import import iter_manual_observations
 from idea_hunter.db.session import session_scope
 from idea_hunter.db.models import Source, Observation, Problem, ProblemEvidence, Opportunity, OpportunityScore, ExistingSolution, ResearchRun, CostLog, ProblemResearch, Trend, HardProblem, TechShift
+from idea_hunter.application.services.ingestion import get_or_create_source_query, mark_source_query_success, normalized_content_hash
+from idea_hunter.application.services.triage import TRIAGE_TYPES, heuristic_triage
 from idea_hunter.config import settings
 from idea_hunter.processing.extractor import ProblemExtractor
 from idea_hunter.processing.cleaner import TextCleaner
@@ -21,6 +27,12 @@ from idea_hunter.processing.verifier import ProblemVerifier
 from idea_hunter.processing.researcher import research_problem, research_priority
 from idea_hunter.llm.router import model_router
 from sqlalchemy.dialects.postgresql import insert
+
+# HN/Reddit/review text can contain characters outside the Windows legacy
+# console code page. Keep Rich output from aborting an otherwise valid run.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 app = typer.Typer(help="Idea Hunter: Local Opportunity Intelligence Engine")
 collect_app = typer.Typer(help="Collect data from sources")
@@ -63,7 +75,8 @@ def collect_hn(
             session.add(run)
             await session.flush()
                 
-            async for obs in collector.collect(query=query, limit=limit, since_cursor=source.last_seen_cursor):
+            source_query = await get_or_create_source_query(session, source_id=source.id, query=query)
+            async for obs in collector.collect(query=query, limit=limit, since_cursor=source_query.last_seen_cursor):
                 clean_text = TextCleaner.process(obs.raw_text)
                 if not clean_text:
                     continue
@@ -79,7 +92,8 @@ def collect_hn(
                 # Use PostgreSQL ON CONFLICT DO NOTHING for deduplication
                 stmt = insert(Observation).values(
                     raw_text=clean_text,
-                    content_hash=obs.content_hash,
+                    content_hash=normalized_content_hash(clean_text),
+                    normalized_text=clean_text,
                     source_id=source.id,
                     source_url=obs.source_url,
                     published_at=obs.published_at,
@@ -92,7 +106,7 @@ def collect_hn(
                 await session.execute(stmt)
                 
                 if obs.cursor_value:
-                    source.last_seen_cursor = obs.cursor_value
+                    mark_source_query_success(source_query, obs.cursor_value)
                     
                 count += 1
                 
@@ -128,7 +142,8 @@ def collect_reviews(
             session.add(run)
             await session.flush()
                 
-            async for obs in collector.collect(query=query, limit=limit, since_cursor=source.last_seen_cursor):
+            source_query = await get_or_create_source_query(session, source_id=source.id, query=query)
+            async for obs in collector.collect(query=query, limit=limit, since_cursor=source_query.last_seen_cursor):
                 clean_text = TextCleaner.process(obs.raw_text)
                 if not clean_text:
                     continue
@@ -142,7 +157,8 @@ def collect_reviews(
                 
                 stmt_insert = insert(Observation).values(
                     raw_text=clean_text,
-                    content_hash=obs.content_hash,
+                    content_hash=normalized_content_hash(clean_text),
+                    normalized_text=clean_text,
                     source_id=source.id,
                     source_url=obs.source_url,
                     published_at=obs.published_at,
@@ -155,7 +171,7 @@ def collect_reviews(
                 await session.execute(stmt_insert)
                 
                 if obs.cursor_value:
-                    source.last_seen_cursor = obs.cursor_value
+                    mark_source_query_success(source_query, obs.cursor_value)
                     
                 count += 1
                 
@@ -191,7 +207,7 @@ def collect_reddit(
             run = ResearchRun(source_type="reddit", query=query)
             session.add(run)
             await session.flush()
-                
+            source_query = await get_or_create_source_query(session, source_id=source.id, query=query)
             async for obs in collector.collect(query=query, limit=limit):
                 clean_text = TextCleaner.process(obs.raw_text)
                 if not clean_text:
@@ -208,7 +224,8 @@ def collect_reddit(
                 # Use PostgreSQL ON CONFLICT DO NOTHING for deduplication
                 stmt_insert = insert(Observation).values(
                     raw_text=clean_text,
-                    content_hash=obs.content_hash,
+                    normalized_text=clean_text,
+                    content_hash=normalized_content_hash(clean_text),
                     source_id=source.id,
                     source_url=obs.source_url,
                     published_at=obs.published_at,
@@ -219,8 +236,9 @@ def collect_reddit(
                 ).on_conflict_do_nothing(index_elements=['content_hash'])
                 
                 await session.execute(stmt_insert)
-                    
+                
                 count += 1
+            mark_source_query_success(source_query)
                 
             run.items_collected = count
             run.status = "completed"
@@ -228,6 +246,40 @@ def collect_reddit(
                 
         console.print(f"\n[bold]Saved {count} observations to database.[/bold]")
         
+    run_async(_run())
+
+
+@process_app.command("triage")
+def triage_observations(
+    limit: int = typer.Option(500, help="Maximum untriaged observations to label"),
+    use_local_model: bool = typer.Option(True, help="Use Ollama first; fall back to deterministic triage on failure"),
+):
+    """Label signals without discarding them: pain, workaround, WTP, contradiction, or noise."""
+    console.print(f"Triaging up to {limit} observations...")
+
+    async def _run():
+        async with session_scope() as session:
+            observations = (await session.execute(
+                select(Observation).where(Observation.triage_state == "pending").limit(limit)
+            )).scalars().all()
+            for observation in observations:
+                text = observation.normalized_text or observation.raw_text
+                result = heuristic_triage(text)
+                if use_local_model:
+                    try:
+                        model_result = await model_router.triage_signal(text)
+                        if model_result.signal_type in TRIAGE_TYPES:
+                            result = type(result)(model_result.signal_type, model_result.confidence, model_result.rationale)
+                    except Exception as error:
+                        console.print(f"[dim]Local triage fallback: {error}[/dim]")
+                observation.signal_type = result.signal_type
+                observation.triage_state = "rejected" if result.signal_type == "noise" else "accepted"
+                # Existing embedding queries use passed_prefilter. Preserve the
+                # storage column while changing its meaning from keyword gate
+                # to an explicit triage outcome.
+                observation.passed_prefilter = result.signal_type != "noise"
+            console.print(f"[bold green]Triaged {len(observations)} observations.[/bold green]")
+
     run_async(_run())
 
 @process_app.command("embed")
@@ -258,10 +310,17 @@ def embed_observations(limit: int = typer.Option(500, help="Number of observatio
                 embeddings = await embedder.embed_batch(texts)
                 
                 for obs, emb in zip(chunk_obs, embeddings):
-                    obs.embedding = emb
+                    obs.embedding_attempts = (obs.embedding_attempts or 0) + 1
+                    if emb:
+                        obs.embedding = emb
+                        obs.embedding_model = settings.ollama_embed_model
+                        obs.embedding_dimension = len(emb)
+                        obs.embedding_state = "completed"
+                    else:
+                        obs.embedding_state = "failed"
                     
                 await session.flush()
-                embedded_count += len(chunk_obs)
+                embedded_count += sum(1 for embedding in embeddings if embedding)
                 console.print(f"Embedded {embedded_count}/{len(observations)}...")
                 
             console.print(f"[bold green]Successfully embedded {embedded_count} items.[/bold green]")
@@ -363,8 +422,9 @@ def cluster_observations():
     run_async(_run())
 
 @process_app.command("extract")
-def extract_problems(limit: int = typer.Option(10, help="Number of clusters to process")):
+def extract_problems(limit: int = typer.Option(None, help="Number of clusters to process")):
     """Run LLM problem extraction on un-extracted clusters."""
+    limit = limit or settings.extraction_clusters_per_run
     console.print(f"Starting extraction pipeline for up to {limit} clusters...")
     
     extractor = ProblemExtractor()
@@ -520,10 +580,11 @@ def verify_problems(
 
 @analyze_app.command("research")
 def research_problems(
-    limit: int = typer.Option(5, help="Number of highest-priority candidates to research"),
+    limit: int = typer.Option(None, help="Number of highest-priority candidates to research"),
     include_needs_evidence: bool = typer.Option(True, help="Research promising candidates that still need corroboration."),
 ):
     """Research the strongest evidence-backed candidates, not only fully verified ones."""
+    limit = limit or settings.research_problems_per_run
     console.print(f"Starting Phase 2 Research Pipeline for up to {limit} problems...")
     
     async def _run():
@@ -665,15 +726,9 @@ def score_opportunities():
     
     async def _run():
         async with session_scope() as session:
-            # Score all researched candidates.  The score retains a separate
-            # evidence confidence value so early hypotheses are not presented
-            # as validated opportunities.
-            stmt = (
-                select(Problem)
-                .outerjoin(Opportunity)
-                .join(ProblemResearch)
-                .where(Opportunity.id == None)
-            )
+            # Scores are versioned and recalculated in place. This keeps a
+            # rerun idempotent instead of creating another opportunity row.
+            stmt = select(Problem).join(ProblemResearch)
             result = await session.execute(stmt)
             problems = result.scalars().all()
             
@@ -692,12 +747,18 @@ def score_opportunities():
                 
                 # 2. Fetch all related observations
                 obs_stmt = (
-                    select(Observation)
+                    select(Observation, Source.source_type)
                     .join(ProblemEvidence, Observation.id == ProblemEvidence.observation_id)
+                    .join(Source, Observation.source_id == Source.id)
                     .where(ProblemEvidence.problem_id == prob.id)
                 )
                 obs_result = await session.execute(obs_stmt)
-                obs_list = obs_result.scalars().all()
+                obs_list = []
+                for observation, source_type in obs_result.all():
+                    # Avoid async lazy-loading Observation.source inside the
+                    # synchronous scoring function.
+                    observation._source_type = source_type
+                    obs_list.append(observation)
                 
                 # Fetch existing solutions count
                 sol_stmt = select(func.count(ExistingSolution.id)).where(ExistingSolution.problem_id == prob.id)
@@ -707,31 +768,46 @@ def score_opportunities():
                 # 3. Score
                 score_dict = EvidenceScorer.score(prob, research, obs_list, sol_count)
                 
-                opp = Opportunity(
-                    problem_id=prob.id,
-                    title=f"Opportunity: {prob.title}",
-                    description=prob.description,
-                    status="scored" if prob.verified else "validation_needed"
+                opp = await session.scalar(select(Opportunity).where(Opportunity.problem_id == prob.id))
+                if not opp:
+                    opp = Opportunity(
+                        problem_id=prob.id,
+                        title=f"Opportunity: {prob.title}",
+                        description=prob.description,
+                    )
+                    session.add(opp)
+                    await session.flush()
+                opp.status = "scored" if prob.verified else "validation_needed"
+
+                score = await session.scalar(
+                    select(OpportunityScore).where(
+                        OpportunityScore.opportunity_id == opp.id,
+                        OpportunityScore.scoring_version == "v2",
+                    )
                 )
-                session.add(opp)
-                await session.flush()
-                
-                score = OpportunityScore(
-                    opportunity_id=opp.id,
-                    pain_severity=score_dict["dimensions"]["pain"]["score"],
-                    frequency=prob.frequency / 10.0 if prob.frequency else 0.5,
-                    growth=score_dict["dimensions"]["market"]["score"],
-                    wtp=score_dict["dimensions"]["wtp"]["score"],
-                    market_size=score_dict["dimensions"]["market"]["score"],
-                    competition_gap=score_dict["dimensions"]["competition"]["score"],
-                    distribution=score_dict["dimensions"]["distribution"]["score"],
-                    technical=score_dict["dimensions"]["technical"]["score"],
-                    final_score=score_dict["final_score"],
-                    evidence_confidence=score_dict["confidence"],
-                    source_diversity=score_dict["ledger"]["platforms_covered"],
-                    breakdown_json=score_dict
-                )
-                session.add(score)
+                values = {
+                    "pain_severity": score_dict["dimensions"]["pain"]["score"],
+                    "frequency": prob.frequency / 10.0 if prob.frequency else 0.5,
+                    "growth": score_dict["dimensions"]["market"]["score"],
+                    "wtp": score_dict["dimensions"]["wtp"]["score"],
+                    "market_size": score_dict["dimensions"]["market"]["score"],
+                    "competition_gap": score_dict["dimensions"]["competition"]["score"],
+                    "distribution": score_dict["dimensions"]["distribution"]["score"],
+                    "technical": score_dict["dimensions"]["technical"]["score"],
+                    "final_score": score_dict["final_score"],
+                    "evidence_confidence": score_dict["confidence"],
+                    "potential": score_dict["potential_score"],
+                    "confidence": score_dict["confidence"],
+                    "freshness_days": score_dict["freshness_days"],
+                    "next_step": score_dict["next_step"],
+                    "source_diversity": score_dict["ledger"]["platforms_covered"],
+                    "breakdown_json": score_dict,
+                }
+                if score:
+                    for field, value in values.items():
+                        setattr(score, field, value)
+                else:
+                    session.add(OpportunityScore(opportunity_id=opp.id, scoring_version="v2", **values))
                 scored_count += 1
                 
         console.print(f"\n[bold]Successfully scored {scored_count} opportunities.[/bold]")
@@ -762,3 +838,97 @@ def system_status():
 
 if __name__ == "__main__":
     app()
+
+@collect_app.command("sources")
+def list_sources():
+    """List the registered discovery sources and their safe acquisition mode."""
+    for source in SOURCES:
+        console.print(f"{source.key:18} {source.acquisition:14} {source.signal_kind:24} {source.name}")
+
+@collect_app.command("source")
+def collect_registered_source(
+    source_key: str = typer.Option(..., "--source", help="Registered source key, e.g. devto or producthunt"),
+    query: str = typer.Option("", help="Source-specific query/tag"),
+    limit: int = typer.Option(100, min=1, max=100),
+):
+    """Collect from a registered source through the existing Observation pipeline."""
+    definition = get_source(source_key)
+    if definition.acquisition not in {"official_api", "public_api"}:
+        raise typer.BadParameter(f"{definition.name} is {definition.acquisition}; use a permitted manual export/import rather than scraping it.")
+    collector = get_collector(source_key)
+
+    async def _run():
+        async with session_scope() as session:
+            source = (await session.execute(select(Source).where(Source.source_type == source_key))).scalar_one_or_none()
+            if not source:
+                source = Source(name=definition.name, source_type=definition.key, base_url=definition.base_url,
+                                reliability_score=definition.reliability, categories=list(definition.categories),
+                                signal_kind=definition.signal_kind, acquisition_method=definition.acquisition,
+                                enabled=True, health_status="starting")
+                session.add(source)
+                await session.flush()
+            run = ResearchRun(source_type=source_key, query=query)
+            session.add(run)
+            await session.flush()
+            count = 0
+            try:
+                source_query = await get_or_create_source_query(session, source_id=source.id, query=query)
+                async for obs in collector.collect(query=query, limit=limit, since_cursor=source_query.last_seen_cursor):
+                    clean_text = TextCleaner.process(obs.raw_text)
+                    if not clean_text:
+                        continue
+                    pf_result = prefilter(clean_text, engagement=obs.engagement or 0)
+                    await session.execute(insert(Observation).values(
+                        raw_text=clean_text, normalized_text=clean_text, content_hash=normalized_content_hash(clean_text), source_id=source.id,
+                        source_url=obs.source_url, published_at=obs.published_at, author=obs.author,
+                        engagement=obs.engagement, topic=obs.topic, country=obs.country,
+                        passed_prefilter=pf_result.passed, metadata_json=obs.metadata,
+                    ).on_conflict_do_nothing(index_elements=["content_hash"]))
+                    if obs.cursor_value:
+                        mark_source_query_success(source_query, obs.cursor_value)
+                    count += 1
+                source.health_status, source.health_note = "healthy", None
+                run.status, run.items_collected = "completed", count
+            except Exception as error:
+                # A single source cannot abort other scheduled collection jobs.
+                source.health_status, source.health_note = "unavailable", str(error)[:1000]
+                run.status, run.notes = "failed", str(error)[:1000]
+            finally:
+                run.completed_at = func.now()
+        console.print(f"{source_key}: completed with {count} items (check source health for failures).")
+    run_async(_run())
+
+
+@collect_app.command("import")
+def import_source_export(
+    source_key: str = typer.Option(..., "--source", help="Registered source key"),
+    file: str = typer.Option(..., "--file", help="Licensed/user-provided .csv or .json export"),
+    topic: str = typer.Option("", help="Optional research topic"),
+):
+    """Import a permitted export through the same Observation ingestion path."""
+    definition = get_source(source_key)
+    async def _run():
+        async with session_scope() as session:
+            source = (await session.execute(select(Source).where(Source.source_type == source_key))).scalar_one_or_none()
+            if not source:
+                source = Source(name=definition.name, source_type=definition.key, base_url=definition.base_url,
+                    reliability_score=definition.reliability, categories=list(definition.categories), signal_kind=definition.signal_kind,
+                    acquisition_method="manual_import", enabled=True, health_status="healthy")
+                session.add(source); await session.flush()
+            run = ResearchRun(source_type=source_key, query=topic or f"manual import: {file}")
+            session.add(run); await session.flush(); count = 0
+            try:
+                for obs in iter_manual_observations(source_key, file, topic):
+                    clean_text = TextCleaner.process(obs.raw_text)
+                    if not clean_text: continue
+                    result = prefilter(clean_text, engagement=obs.engagement or 0)
+                    await session.execute(insert(Observation).values(raw_text=clean_text, normalized_text=clean_text, content_hash=normalized_content_hash(clean_text),
+                        source_id=source.id, source_url=obs.source_url, published_at=obs.published_at, author=obs.author,
+                        engagement=obs.engagement, topic=obs.topic, metadata_json=obs.metadata, passed_prefilter=result.passed
+                    ).on_conflict_do_nothing(index_elements=["content_hash"]))
+                    count += 1
+                run.status, run.items_collected, source.health_status = "completed", count, "healthy"
+            except Exception as error:
+                run.status, run.notes, source.health_status, source.health_note = "failed", str(error)[:1000], "unavailable", str(error)[:1000]
+            finally: run.completed_at = func.now()
+    run_async(_run())

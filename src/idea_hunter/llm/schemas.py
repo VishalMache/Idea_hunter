@@ -16,6 +16,11 @@ class ClassificationResult(BaseModel):
     is_complaint: bool = Field(..., description="True if the text describes a genuine problem, frustration, or complaint.")
     category: str = Field(..., description="The category of the text (e.g. 'bug', 'missing feature', 'usability issue', 'pricing', 'other').")
 
+class SignalTriage(BaseModel):
+    signal_type: str = Field(..., description="Exactly one of: pain, workaround, willingness_to_pay, contradiction, noise.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in the signal type.")
+    rationale: str = Field(..., description="Short explanation grounded only in the supplied text.")
+
 class CompetitorDetail(BaseModel):
     name: str = Field(..., description="Name of the competitor")
     url: str = Field(..., description="Likely URL or domain")

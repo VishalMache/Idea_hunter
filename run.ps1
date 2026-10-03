@@ -68,41 +68,73 @@ if (-not $SkipDashboard) {
     Start-DashboardServices
 }
 
+# Keep the live database schema aligned with the checked-in SQLAlchemy models
+# before any collector or pipeline stage queries Source/Observation records.
+Step "SCHEMA PREFLIGHT -- Applying database migrations"
+Run @(".venv\Scripts\alembic", "upgrade", "heads")
+
 # -- STEP 1: Collect ----------------------------------------------------------
 if (-not $SkipCollect) {
-    Step "STEP 1/7 -- Collecting Data from HackerNews"
+    Step "STEP 1/8 -- Collecting Data from HackerNews"
     foreach ($q in $Queries) {
         Write-Host "  Querying: '$q'" -ForegroundColor White
         Run @($Python, "-m", "idea_hunter.cli.main", "collect", "hackernews", "--query", $q, "--limit", "100")
+    }
+
+    Step "STEP 1B -- Collecting Data from Enabled Public/API Sources"
+    Write-Host "  Collecting DEV.to articles..." -ForegroundColor White
+    Run @($Python, "-m", "idea_hunter.cli.main", "collect", "source", "--source", "devto", "--query", "saas", "--limit", "50")
+
+    $envFile = if (Test-Path ".env") { Get-Content ".env" -Raw } else { "" }
+    $redditConfigured = $envFile -match '(?m)^REDDIT_CLIENT_ID=.+\S' -and $envFile -match '(?m)^REDDIT_CLIENT_SECRET=.+\S'
+    if ($redditConfigured) {
+        Write-Host "  Collecting Reddit community signals..." -ForegroundColor White
+        foreach ($q in $Queries) {
+            Run @($Python, "-m", "idea_hunter.cli.main", "collect", "reddit", "--query", "$q | SaaS,startups,Entrepreneur", "--limit", "25")
+        }
+    } else {
+        Write-Host "  [SKIP] Reddit collector disabled: credentials are not configured." -ForegroundColor Yellow
+    }
+
+    $productHuntConfigured = $envFile -match '(?m)^PRODUCT_HUNT_TOKEN=.+\S'
+    if ($productHuntConfigured) {
+        Write-Host "  Collecting Product Hunt product signals..." -ForegroundColor White
+        Run @($Python, "-m", "idea_hunter.cli.main", "collect", "source", "--source", "producthunt", "--query", "startup products", "--limit", "25")
+    } else {
+        Write-Host "  [SKIP] Product Hunt collector disabled: PRODUCT_HUNT_TOKEN is not configured." -ForegroundColor Yellow
     }
 } else {
     Write-Host "[SKIP] Data collection skipped (using existing observations)" -ForegroundColor Yellow
 }
 
 # -- STEP 2: Embed ------------------------------------------------------------
-Step "STEP 2/7 -- Embed Observations"
+Step "STEP 2/8 -- Triage Signals (pain/workaround/WTP/contradiction/noise)"
+Run @($Python, "-m", "idea_hunter.cli.main", "process", "triage")
+
+# -- STEP 3: Embed ------------------------------------------------------------
+Step "STEP 3/8 -- Embed Accepted Observations"
 Run @($Python, "-m", "idea_hunter.cli.main", "process", "embed")
 
-# -- STEP 3: Cluster ----------------------------------------------------------
-Step "STEP 3/7 -- Clustering Similar Problems"
+# -- STEP 4: Cluster ----------------------------------------------------------
+Step "STEP 4/8 -- Clustering Similar Problems"
 Run @($Python, "-m", "idea_hunter.cli.main", "process", "cluster")
 
-# -- STEP 4: Extract ----------------------------------------------------------
-Step "STEP 4/7 -- Extracting Structured Problems from Clusters"
-Run @($Python, "-m", "idea_hunter.cli.main", "process", "extract")
+# -- STEP 5: Extract ----------------------------------------------------------
+Step "STEP 5/8 -- Extracting Structured Problems from Eligible Clusters"
+Run @($Python, "-m", "idea_hunter.cli.main", "process", "extract", "--limit", "2")
 
-# -- STEP 5: Research ---------------------------------------------------------
-Step "STEP 5/7 -- Verify + Deep Research (Bull/Bear/Market Intelligence)"
+# -- STEP 6: Research ---------------------------------------------------------
+Step "STEP 6/8 -- Verify + Deep Research (Bull/Bear/Market Intelligence)"
 Run @($Python, "-m", "idea_hunter.cli.main", "process", "verify")
-Run @($Python, "-m", "idea_hunter.cli.main", "analyze", "research")
+Run @($Python, "-m", "idea_hunter.cli.main", "analyze", "research", "--limit", "1")
 Run @($Python, "-m", "idea_hunter.cli.main", "analyze", "path-b")
 
-# -- STEP 6: Score ------------------------------------------------------------
-Step "STEP 6/7 -- Evidence-Backed Scoring"
+# -- STEP 7: Score ------------------------------------------------------------
+Step "STEP 7/8 -- Potential, Confidence, Freshness, and Next Step"
 Run @($Python, "-m", "idea_hunter.cli.main", "analyze", "score")
 
-# -- STEP 7: Report -----------------------------------------------------------
-Step "STEP 7/7 -- Generating Opportunity Report"
+# -- STEP 8: Report -----------------------------------------------------------
+Step "STEP 8/8 -- Generating Opportunity Report"
 Run @($Python, "-m", "idea_hunter.cli.main", "output", "report")
 
 Write-Host ""

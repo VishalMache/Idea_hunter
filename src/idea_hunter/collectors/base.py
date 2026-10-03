@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from typing import AsyncGenerator
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 class RawObservation(BaseModel):
     """Schema for raw data collected from sources before processing."""
@@ -17,6 +17,8 @@ class RawObservation(BaseModel):
     topic: Optional[str] = None
     country: Optional[str] = None
     cursor_value: Optional[str] = None
+    # Source-specific, provenance-preserving fields (title, tags, rating, pricing, etc.).
+    metadata: dict[str, Any] = Field(default_factory=dict)
     
     def model_post_init(self, __context):
         if not self.content_hash and self.raw_text:

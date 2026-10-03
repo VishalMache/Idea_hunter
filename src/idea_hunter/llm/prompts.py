@@ -18,6 +18,12 @@ CLASSIFICATION_SYSTEM_PROMPT = """You are a classification system. Your job is t
 Respond ONLY with valid JSON matching the requested schema.
 """
 
+SIGNAL_TRIAGE_SYSTEM_PROMPT = """You classify one observation for an opportunity-research system.
+Choose exactly one signal type: pain, workaround, willingness_to_pay, contradiction, or noise.
+Do not reject an item merely because it lacks a familiar keyword. Use only the supplied text,
+and do not invent context. Respond ONLY with valid JSON matching the requested schema.
+"""
+
 COMPETITION_ANALYSIS_SYSTEM_PROMPT = """You are an expert market analyst. Your job is to read a cluster of user complaints and analyze the competitive landscape.
 Identify the existing solutions users are trying to use, explain exactly why they are failing, and define the market gap.
 Respond ONLY with valid JSON matching the requested schema.

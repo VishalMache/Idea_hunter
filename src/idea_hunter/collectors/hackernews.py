@@ -1,6 +1,6 @@
 import httpx
 from datetime import datetime
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from urllib.parse import quote_plus
 from idea_hunter.collectors.base import BaseCollector, RawObservation
 

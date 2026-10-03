@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ideahunter
+      POSTGRES_USER: ideahunter
+      POSTGRES_PASSWORD: ideahunter
+    ports:
+      - "5432:5432"
+    volumes:
+      - idea_hunter_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ideahunter -d ideahunter"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ideahunter:ideahunter@postgres:5432/ideahunter
+      API_CORS_ORIGINS: http://localhost:5173
+    command: sh -c "alembic upgrade head && uvicorn idea_hunter.api.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ideahunter:ideahunter@postgres:5432/ideahunter
+    command: python -m idea_hunter.infrastructure.jobs.worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  idea_hunter_postgres:

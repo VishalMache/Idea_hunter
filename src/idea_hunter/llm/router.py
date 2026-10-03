@@ -2,12 +2,12 @@ from pydantic import BaseModel
 from typing import Type, TypeVar
 from idea_hunter.llm.client import local_client, hosted_client
 from idea_hunter.llm.schemas import (
-    ExtractedProblem, ClassificationResult, CompetitionAnalysis,
+    ExtractedProblem, ClassificationResult, SignalTriage, CompetitionAnalysis,
     CustomerAnalysis, MarketResearch, TechnicalAssessment, DistributionAssessment,
     WhyNowAssessment, BullBearDebate, PathBAssessment
 )
 from idea_hunter.llm.prompts import (
-    CLUSTER_EXTRACTION_SYSTEM_PROMPT, CLASSIFICATION_SYSTEM_PROMPT, COMPETITION_ANALYSIS_SYSTEM_PROMPT,
+    CLUSTER_EXTRACTION_SYSTEM_PROMPT, CLASSIFICATION_SYSTEM_PROMPT, SIGNAL_TRIAGE_SYSTEM_PROMPT, COMPETITION_ANALYSIS_SYSTEM_PROMPT,
     CUSTOMER_RESEARCH_SYSTEM_PROMPT, MARKET_RESEARCH_SYSTEM_PROMPT, TECHNICAL_FEASIBILITY_SYSTEM_PROMPT,
     DISTRIBUTION_DIFFICULTY_SYSTEM_PROMPT, WHY_NOW_SYSTEM_PROMPT, BULL_BEAR_DEBATE_SYSTEM_PROMPT,
     PATH_B_SYSTEM_PROMPT
@@ -33,6 +33,15 @@ class ModelRouter:
             system_prompt=CLASSIFICATION_SYSTEM_PROMPT,
             schema=ClassificationResult,
             model=settings.ollama_model_small
+        )
+
+    async def triage_signal(self, text: str) -> SignalTriage:
+        """Recall-oriented local triage; keyword matching is only one feature."""
+        return await local_client.generate_structured(
+            prompt=f"Classify this observation:\n\n{text}",
+            system_prompt=SIGNAL_TRIAGE_SYSTEM_PROMPT,
+            schema=SignalTriage,
+            model=settings.ollama_model_small,
         )
         
     async def extract_problem(self, texts: list[str], run_id: int = None) -> ExtractedProblem:
